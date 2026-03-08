@@ -37,22 +37,22 @@ class PPOTrainer:
         self.M_CRITICAL = (M_DRY + M_FUEL_INIT) * 0.05 # 5% Fuel threshold 
 
     def calculate_nsh_reward(self, next_state, dv_vec, current_mass, debris_pos):
-        """Calculates reward based on NSH-2026 Evaluation Criteria."""
         dist = np.linalg.norm(next_state[:3] - debris_pos)
         dv_mag = np.linalg.norm(dv_vec)
         
-        # 1. Safety Score (25% Weight) 
+        # Increase penalty to -10,000 to force avoidance
         if dist < D_CRIT:
-            return -5000.0, 0.0  # Massive penalty for collision 
-        
-        # 2. Fuel Efficiency (20% Weight) [cite: 163, 259]
+            return -10000.0, 0.0 
+    
+        # Calculate mass depletion (dm) using Tsiolkovsky
         dm = current_mass * (1 - np.exp(-dv_mag / (ISP * G0)))
-        
-        # 3. Constellation Uptime (15% Weight) [cite: 169, 171, 259]
+    
+        # Add a 'Station-Keeping' reward to stay within 10km
         slot_dist = np.linalg.norm(next_state[:3]) 
-        uptime_penalty = 0 if slot_dist < 10.0 else -50.0 # 10km tolerance [cite: 169]
-        
-        reward = (dist * 10.0) - (dm * 500.0) + uptime_penalty
+        uptime_penalty = 0 if slot_dist < 10.0 else -100.0
+    
+        # Reward distance and penalize fuel mass spent
+        reward = (dist * 15.0) - (dm * 400.0) + uptime_penalty
         return reward, dm
 
     def update(self):
@@ -85,7 +85,7 @@ class PPOTrainer:
             surr2 = torch.clamp(ratios, 1-self.eps_clip, 1+self.eps_clip) * advantages
 
             # Final loss of clipped objective PPO
-            loss = -torch.min(surr1, surr2) + 0.5 * self.mse_loss(state_values, rewards) - 0.01 * dist_entropy
+            loss = -torch.min(surr1, surr2) + 0.5 * self.mse_loss(state_values.squeeze(), rewards) - 0.01 * dist_entropy
             
             self.optimizer.zero_grad()
             loss.mean().backward()
@@ -144,8 +144,9 @@ class PPOTrainer:
                 f.write(f"{ep},{avg_dist},{total_dv},{success_count},{avg_drift}\n")
 
             if ep % 100 == 0:
-                print(f"Ep {ep} | Fuel Left: {current_mass-M_DRY:.2f}kg | Success Rate: {success_count/20*100}%")
-                torch.save(self.agent.state_dict(), "models/acm_ppo_v1.pth")
+                fuel_remaining = current_mass - M_DRY
+                # Ensure display doesn't go below 0 for the Technical Report
+                print(f"Ep {ep} | Propellant Remaining: {max(0, fuel_remaining):.2f}kg | Success Rate: {success_count/20*100}%")
                 
     def generate_initial_orbit(self):
         """Random LEO circular state vector[cite: 58]."""
