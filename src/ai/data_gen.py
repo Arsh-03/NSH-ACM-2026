@@ -1,48 +1,73 @@
 import numpy as np
 from src.physics.integrator import rk4_step
 
-# NSH-2026 Constants [cite: 65, 67]
+# NSH-2026 Physics Constants
 RE = 6378.137 
 MU = 398600.4418
 
 def generate_conjunction_scenario(sat_state):
     """
-    Generates a 'Threat' debris object that will pass within 
-    the 100m critical threshold if no action is taken. 
+    Creates a debris object that is physically in orbit and 
+    guaranteed to pass within 500m of the satellite at t=1000s.
     """
-    # 1. Target a point in the future (e.g., 30 mins away)
-    t_collision = 1800 
-    future_sat_pos = rk4_step(sat_state, t_collision)[:3]
+    # 1. Project the satellite's "Nominal Path" forward
+    # We pick a time-to-closest-approach (TCA) of 1000 seconds
+    t_ca = 1000.0 
+    future_sat = rk4_step(sat_state, t_ca)
+    future_pos = future_sat[:3]
     
-    # 2. Spawn debris that intersects this point
-    # We add a small random offset to simulate 'Near Misses' vs 'Direct Hits'
-    offset = np.random.uniform(-0.15, 0.15, 3) # 150m variance
-    debris_pos_at_t = future_sat_pos + offset
+    # 2. Define the "Kill Zone" (The intersection point)
+    # We add a 0.2 km (200m) offset to force the AI to distinguish 
+    # between 'Safe' and 'Unsafe' encounters.
+    offset = np.random.uniform(-0.2, 0.2, 3) 
+    collision_point = future_pos + offset
     
-    # 3. Calculate an incoming velocity (Hypervelocity: ~7.5 km/s) [cite: 14]
-    # We pick a random incoming vector to simulate different encounter geometries
+    # 3. Generate a valid Debris Orbit
+    # Instead of linear back-propagation, we give the debris a 
+    # hypervelocity vector (~7.8 km/s) at the collision point.
+    v_mag = np.sqrt(MU / np.linalg.norm(collision_point)) * np.random.uniform(1.02, 1.1)
+    
+    # Random encounter angle (Inclination/RAAN difference)
     direction = np.random.randn(3)
     direction /= np.linalg.norm(direction)
-    debris_vel = direction * 7.5 
+    debris_vel_at_ca = direction * v_mag
     
-    # 4. Back-propagate to get the debris starting state at t=0
-    # (Simplified: moving backwards in time)
-    debris_start_pos = debris_pos_at_t - (debris_vel * t_collision)
+    # 4. Integrate BACKWARDS using RK4 to get the start state
+    # This ensures the debris follows a curved Keplerian path
+    debris_at_ca = np.concatenate([collision_point, debris_vel_at_ca])
+    debris_start_state = rk4_step(debris_at_ca, -t_ca)
     
-    return np.append(debris_start_pos, debris_vel)
+    return debris_start_state
 
 def get_training_batch(batch_size=64):
     """
-    Creates a batch of satellite-debris pairs for the PPO Trainer.
+    Generates diverse LEO orbits (Inclined, Polar, Equatorial)
+    to ensure the AI generalizes across the whole constellation.
     """
     batch = []
     for _ in range(batch_size):
-        # Random LEO Altitude (400km - 2000km) [cite: 12]
-        alt = np.random.uniform(400, 2000)
-        r_mag = RE + alt
+        # Random Altitude 400-1200km (Dense debris zone)
+        r_mag = RE + np.random.uniform(400, 1200)
         v_mag = np.sqrt(MU / r_mag)
         
-        sat_state = np.array([r_mag, 0, 0, 0, v_mag, 0]) # Circular starter
+        # Randomize orientation (Theta and Phi)
+        phi = np.random.uniform(0, 2*np.pi)
+        theta = np.random.uniform(0, np.pi)
+        
+        # Position vector
+        pos = r_mag * np.array([
+            np.sin(theta) * np.cos(phi),
+            np.sin(theta) * np.sin(phi),
+            np.cos(theta)
+        ])
+        
+        # Velocity vector (Perpendicular to position for circular orbit)
+        v_dir = np.random.randn(3)
+        v_dir -= v_dir.dot(pos) * pos / np.linalg.norm(pos)**2
+        v_dir /= np.linalg.norm(v_dir)
+        vel = v_dir * v_mag
+        
+        sat_state = np.concatenate([pos, vel])
         debris_state = generate_conjunction_scenario(sat_state)
         
         batch.append((sat_state, debris_state))
