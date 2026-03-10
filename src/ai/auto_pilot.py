@@ -6,7 +6,7 @@ from src.ai.ppo_agent import PPOAgent
 from src.api.maneuvers import execute_burn, ManeuverRequest
 from src.ai.conjunction import ConjunctionAnalyzer
 from src.ai.recovery import calculate_recovery_burn
-from src.physics.environment import has_line_of_sight, eci_to_lla
+from src.comms.blackout import is_in_blackout
 
 # --- Constants from NSH-2026 PS ---
 D_CRIT = 0.1  # 100m Critical Collision Threshold [cite: 70]
@@ -35,7 +35,8 @@ async def run_auto_pilot():
 
             # State & Connectivity Check [cite: 185, 192]
             sat_state = np.array(data["r"] + data["v"])
-            is_connected = has_line_of_sight(data["r"])
+            is_blackout, _ = is_in_blackout(data["r"])
+            is_connected = not is_blackout
             current_time = data["last_update"]
 
             # --- STEP 1: SAFETY CHECK (REACTIVE & STRATEGIC) --- [cite: 41, 42]
