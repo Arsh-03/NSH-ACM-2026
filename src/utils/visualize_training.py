@@ -1,3 +1,4 @@
+import os
 import matplotlib.pyplot as plt
 import pandas as pd
 import numpy as np
@@ -36,3 +37,8 @@ def plot_training_results(log_file="logs/training_history.csv"):
     plt.savefig("outputs/training_analytics.png")
     print("📈 Analytics saved to outputs/training_analytics.png")
     plt.show()
+
+
+if __name__ == "__main__":
+    os.makedirs("outputs", exist_ok=True)
+    plot_training_results()
