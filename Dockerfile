@@ -8,9 +8,9 @@ ENV PYTHONUNBUFFERED=1
 # 1. Install System Dependencies
 # We include git and build-essential just in case any library needs a quick compile
 RUN apt-get update && apt-get install -y \
-    python3.11 \
+    python3 \
     python3-pip \
-    python3.11-venv \
+    python3-venv \
     git \
     build-essential \
     && rm -rf /var/lib/apt/lists/*
@@ -32,6 +32,6 @@ COPY . .
 # 6. Expose Port 8000 for the Simulation Grader
 EXPOSE 8000
 
-# 7. Start the FastAPI server using Uvicorn
-# We bind to 0.0.0.0 so it's accessible from outside the container
-CMD ["python3", "-m", "uvicorn", "main.py", "--host", "0.0.0.0", "--port", "8000"]
+# 7. Start the FastAPI server
+# main.py internally calls uvicorn.run(app, host="0.0.0.0", port=8000)
+CMD ["python3", "main.py"]
