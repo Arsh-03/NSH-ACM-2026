@@ -14,7 +14,6 @@ from src.ai.auto_pilot import run_auto_pilot
 # ── App ───────────────────────────────────────────────────────────────────────
 app = FastAPI(title="NSH-ACM-2026 Mission Control")
 
-# ── CORS ──────────────────────────────────────────────────────────────────────
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -39,7 +38,6 @@ async def websocket_endpoint(websocket: WebSocket):
     print(f"[WS] Client connected. Total: {len(connected_clients)}")
 
     try:
-        # Send full state immediately on connect
         await _send_state(websocket)
 
         while True:
@@ -62,7 +60,6 @@ async def websocket_endpoint(websocket: WebSocket):
                     }))
 
             except asyncio.TimeoutError:
-                # Push live update every second even with no incoming message
                 if websocket.client_state == WebSocketState.CONNECTED:
                     await _send_state(websocket)
 
@@ -75,42 +72,47 @@ async def websocket_endpoint(websocket: WebSocket):
             connected_clients.remove(websocket)
 
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
+# ── State builder ─────────────────────────────────────────────────────────────
 async def _send_state(websocket: WebSocket):
-    """Sends full constellation state to one client."""
     from src.api.telemetry import orbital_registry
 
     satellites, debris = [], []
 
     for obj_id, data in orbital_registry.items():
+        # Skip malformed entries
+        if not data.get("r") or not data.get("v"):
+            continue
+        if not obj_id:
+            continue
+
         obj = {
-            "id":   obj_id,
-            "r":    data.get("r",   [0, 0, 0]),
-            "v":    data.get("v",   [0, 0, 0]),
-            "fuel": round(data.get("fuel_mass", 50.0), 2),
-            "type": data.get("type", "UNKNOWN"),
+            "id":   str(obj_id),
+            "r":    [float(x) for x in data["r"]],
+            "v":    [float(x) for x in data["v"]],
+            "fuel": float(data.get("fuel_mass", 50.0)),
+            "type": str(data.get("type", "UNKNOWN")),
         }
+
         if data.get("type") == "SATELLITE":
-            obj["status"]    = data.get("status",    "NOMINAL")
-            obj["last_burn"] = data.get("last_burn",  0)
+            obj["status"]    = str(data.get("status", "NOMINAL"))
+            obj["last_burn"] = float(data.get("last_burn", 0))
             satellites.append(obj)
-        else:
+        elif data.get("type") == "DEBRIS":
             debris.append(obj)
 
     payload = {
         "type":         "state_update",
-        "timestamp":    time.time(),
+        "timestamp":    float(time.time()),
         "satellites":   satellites,
         "debris":       debris,
-        "sat_count":    len(satellites),
-        "debris_count": len(debris),
-        "total":        len(orbital_registry),
+        "sat_count":    int(len(satellites)),
+        "debris_count": int(len(debris)),
+        "total":        int(len(orbital_registry)),
     }
     await websocket.send_text(json.dumps(payload))
 
 
 def _build_strategy() -> str:
-    """Returns AI strategic assessment for the frontend advisory panel."""
     from src.api.telemetry import orbital_registry
 
     sats   = [v for v in orbital_registry.values()
@@ -122,18 +124,22 @@ def _build_strategy() -> str:
         return ("No satellites registered. "
                 "Send telemetry to begin constellation tracking.")
 
-    low_fuel = [s for s in sats if s.get("fuel_mass", 50) < 10]
+    low_fuel = [s for s in sats if float(s.get("fuel_mass", 50)) < 10]
+    evading  = [s for s in sats if s.get("status") == "EVADING"]
 
     msg  = (f"Tracking {len(sats)} satellite(s) and "
             f"{len(debris)} debris object(s). ")
-    msg += ("All systems nominal. " if not low_fuel else
-            f"WARNING: {len(low_fuel)} satellite(s) below 10 kg fuel. ")
+    if evading:
+        msg += f"ALERT: {len(evading)} satellite(s) executing evasion burn. "
+    elif low_fuel:
+        msg += f"WARNING: {len(low_fuel)} satellite(s) below 10kg fuel. "
+    else:
+        msg += "All systems nominal. "
     msg += "PPO collision avoidance ACTIVE. Station-keeping ENABLED."
     return msg
 
 
 async def broadcast(message: dict):
-    """Push an alert to all connected WebSocket clients."""
     dead = []
     for ws in connected_clients:
         try:
@@ -149,13 +155,14 @@ async def broadcast(message: dict):
 @app.get("/api/health")
 async def health_check():
     from src.api.telemetry import orbital_registry
+    sats = sum(1 for v in orbital_registry.values()
+               if v.get("type") == "SATELLITE")
     return {
-        "status":     "operational",
-        "system":     "ACM-v1",
+        "status":      "operational",
+        "system":      "ACM-v1",
         "model_ready": True,
-        "satellites": sum(1 for v in orbital_registry.values()
-                          if v.get("type") == "SATELLITE"),
-        "ws_clients": len(connected_clients),
+        "satellites":  int(sats),
+        "ws_clients":  int(len(connected_clients)),
     }
 
 
@@ -165,7 +172,7 @@ async def startup_event():
     asyncio.create_task(run_auto_pilot())
 
 
-# ── Static frontend (uncomment after npm run build) ───────────────────────────
+# ── Serve frontend (uncomment after npm run build) ────────────────────────────
 # app.mount("/", StaticFiles(directory="frontend/dist", html=True), name="frontend")
 
 if __name__ == "__main__":
