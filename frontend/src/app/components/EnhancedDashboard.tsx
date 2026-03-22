@@ -4,7 +4,7 @@ import * as Tooltip from '@radix-ui/react-tooltip';
 import { SatelliteTabs } from './SatelliteTabs';
 import { TelemetryLog } from './TelemetryLog';
 import imgFrame2 from "../../assets/9394663ed06f79040e5fccebf1cd472a901e3df0.png";
-import imgFrame3 from "../../assets/ab200c4fdecc0a845ba3d8d89b9708fc96134892.png";
+import imgFrame3 from "../../assets/earth_globe.jpg";
 import imgSatellite from "../../assets/6292a4c2f7fce59afb681a45c010a7b66e40fa69.png";
 import imgWarning from "../../assets/f85026c63fdf650839667e94cb9920852e2d6935.png";
 import svgPaths from "../../imports/svg-2gbe90s142";
@@ -117,6 +117,140 @@ function useLiveData() {
   return { satellites, debrisList, counts, connected, istTime };
 }
 
+// ── Canvas Globe — true Y-axis Earth rotation ─────────────────────────────────
+function GlobeCanvas({ cx, cy, radius, textureSrc }: {
+  cx: number; cy: number; radius: number; textureSrc: string;
+}) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const imgRef    = useRef<HTMLImageElement | null>(null);
+  const offsetRef = useRef(0);
+  const rafRef    = useRef<number>(0);
+  const D = radius * 2;
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+
+    const img = new Image();
+    img.crossOrigin = "anonymous";
+    img.src = textureSrc;
+    imgRef.current = img;
+
+    const draw = () => {
+      // Decrease offset → texture scrolls right, globe appears to spin left-to-right
+      offsetRef.current = (offsetRef.current - (D * 2) / (60 * 60) + D * 2) % (D * 2);
+      const off = offsetRef.current;
+
+      ctx.clearRect(0, 0, D + 20, D + 20);
+
+      ctx.save();
+      ctx.beginPath();
+      ctx.arc(radius + 10, radius + 10, radius, 0, Math.PI * 2);
+      ctx.clip();
+
+      if (img.complete && img.naturalWidth > 0) {
+        const tw = D * 2;
+        const th = D;
+        ctx.drawImage(img, 10 - off,          10, tw, th);
+        ctx.drawImage(img, 10 + tw - off,      10, tw, th);
+        ctx.drawImage(img, 10 - tw - off + tw, 10, tw, th);
+      } else {
+        ctx.fillStyle = "#0a1628";
+        ctx.fillRect(0, 0, D + 20, D + 20);
+      }
+
+      // Terminator — thin night crescent on left edge only, globe mostly fully lit
+      const cx2 = radius + 10;
+      const cy2 = radius + 10;
+
+      // Main shadow: darkens only the left rim, fades quickly toward center
+      const shadow = ctx.createRadialGradient(
+      cx2 * 1.45, cy2, radius * 0.1,   // light source on RIGHT ✅
+      cx2 * 1.4,  cy2, radius * 1.02   // bring darkness closer to LEFT EDGE
+      );
+      shadow.addColorStop(0,    "rgba(0,0,0,0)");
+      shadow.addColorStop(0.55, "rgba(0,0,0,0)");
+      shadow.addColorStop(0.72, "rgba(0,0,10,0.30)");
+      shadow.addColorStop(0.87, "rgba(0,0,15,0.68)");
+      shadow.addColorStop(1,    "rgba(0,0,20,0.90)");
+      ctx.fillStyle = shadow;
+      ctx.fillRect(0, 0, D + 20, D + 20);
+
+      // Specular highlight — top-right, light source from east
+      const spec = ctx.createRadialGradient(
+        (radius + 10) * 1.62, (radius + 10) * 0.32, 0,
+        (radius + 10) * 1.62, (radius + 10) * 0.32, radius * 0.48
+      );
+      spec.addColorStop(0,   "rgba(200,220,255,0.10)");
+      spec.addColorStop(0.3, "rgba(180,200,255,0.04)");
+      spec.addColorStop(1,   "rgba(0,0,0,0)");
+      ctx.fillStyle = spec;
+      ctx.fillRect(0, 0, D + 20, D + 20);
+
+      // Edge darkening — strong dark rim
+      // const edge = ctx.createRadialGradient(radius+10, radius+10, radius * 0.65, radius+10, radius+10, radius);
+      // edge.addColorStop(0,    "rgba(0,0,8,0)");
+      // edge.addColorStop(0.6,  "rgba(0,0,8,0.10)");
+      // edge.addColorStop(1,    "rgba(0,0,8,0.82)");
+      // ctx.fillStyle = edge;
+      // ctx.fillRect(0, 0, D + 20, D + 20);
+      const edge = ctx.createRadialGradient(
+        radius+10, radius+10, radius * 0.85,
+        radius+10, radius+10, radius
+      );
+      edge.addColorStop(0,   "rgba(0,0,0,0)");
+      edge.addColorStop(1,   "rgba(0,0,0,0.25)");
+      ctx.fillStyle = edge;
+      ctx.fillRect(0, 0, D + 20, D + 20);
+
+      ctx.restore();
+
+      // Atmosphere rim — vivid thin blue ring around entire globe edge
+      // Atmosphere — OUTWARD glow (correct NASA style)
+      const atmo = ctx.createRadialGradient(
+        radius+10, radius+10, radius * 0.98,   // start EXACTLY at edge
+        radius+10, radius+10, radius * 1.08    // expand OUTWARD
+      );
+
+      atmo.addColorStop(0,    "rgba(80,140,255,0.0)");  // no glow inside
+      atmo.addColorStop(0.1,  "rgba(80,140,255,0.6)");  // strong rim
+      atmo.addColorStop(0.25, "rgba(60,120,255,0.8)");  // peak glow
+      atmo.addColorStop(0.45, "rgba(50,100,255,0.5)");  // fading
+      atmo.addColorStop(0.7,  "rgba(30,70,220,0.25)");  // soft fade
+      atmo.addColorStop(1,    "rgba(0,0,0,0)");         // fully gone
+
+      ctx.fillStyle = atmo;
+      ctx.beginPath();
+      ctx.arc(radius+10, radius+10, radius * 1.25, 0, Math.PI * 2);
+      ctx.fill();
+
+      rafRef.current = requestAnimationFrame(draw);
+    };
+
+    img.onload  = () => { rafRef.current = requestAnimationFrame(draw); };
+    img.onerror = () => { rafRef.current = requestAnimationFrame(draw); };
+
+    return () => cancelAnimationFrame(rafRef.current);
+  }, [textureSrc, D, radius]);
+
+  const size = D + 20;
+  return (
+    <canvas
+      ref={canvasRef}
+      width={size}
+      height={size}
+      style={{
+        position: "absolute",
+        left: cx - radius - 10,
+        top:  cy - radius - 10,
+        pointerEvents: "none",
+      }}
+    />
+  );
+}
+
 // ── Globe with all satellites ─────────────────────────────────────────────────
 function GlobeView({
   satellites, debrisList, selectedId, onSelect
@@ -126,8 +260,24 @@ function GlobeView({
   selectedId: string;
   onSelect: (id: string) => void;
 }) {
-  // Globe center and radius in the 1310x616 container
-  const CX = 655, CY = 308, GLOBE_R = 165;
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [dims, setDims] = useState({ w: 900, h: 500 });
+
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const obs = new ResizeObserver(entries => {
+      for (const e of entries) {
+        setDims({ w: e.contentRect.width, h: e.contentRect.height });
+      }
+    });
+    obs.observe(el);
+    return () => obs.disconnect();
+  }, []);
+
+  const CX = dims.w * 0.45;
+  const CY = dims.h * 0.50;
+  const GLOBE_R = Math.min(dims.w * 0.28, dims.h * 0.42, 200);
 
   const satColors: Record<string, string> = {
     NOMINAL:     '#3a7fff',
@@ -137,26 +287,18 @@ function GlobeView({
   };
 
   return (
-    <div className="absolute h-[616px] left-[43px] rounded-[5px] top-[94px] w-[1310px]">
+    <div ref={containerRef} style={{ position: 'absolute', inset: 0, borderRadius: 5 }}>
       {/* Background */}
       <div className="absolute inset-0 overflow-hidden pointer-events-none rounded-[5px]">
         <img alt="" className="absolute h-[133.97%] left-[-1.15%] max-w-none top-[-33.97%] w-[139.11%]" src={imgFrame2} />
       </div>
 
       <div className="overflow-clip relative rounded-[inherit] size-full">
-        {/* Rotating Globe */}
-        <motion.div
-          className="absolute overflow-clip rounded-[414px]"
-          style={{ width:330, height:340, left: CX-165, top: CY-170 }}
-          animate={{ rotate:360 }}
-          transition={{ duration:120, repeat:Infinity, ease:"linear" }}>
-          <div className="absolute inset-0 overflow-hidden rounded-[414px]">
-            <img alt="" className="absolute h-[112.89%] left-[-4.62%] max-w-none top-[-7.4%] w-[111.22%]" src={imgFrame3} />
-          </div>
-        </motion.div>
+        {/* Rotating Globe — canvas-based horizontal scroll (true Y-axis Earth spin) */}
+        <GlobeCanvas cx={CX} cy={CY} radius={165} textureSrc={imgFrame3} />
 
-        {/* Orbit path */}
-        <motion.div className="absolute" style={{ left:500, top:147, width:260, height:218 }}
+        {/* Orbit path — positioned relative to globe center */}
+        <motion.div className="absolute" style={{ left: CX - 155, top: CY - 161, width: 260, height: 218 }}
           animate={{ opacity:[0.6,1,0.6], filter:['drop-shadow(0 0 4px rgba(151,71,255,0.5))','drop-shadow(0 0 8px rgba(151,71,255,0.8))','drop-shadow(0 0 4px rgba(151,71,255,0.5))'] }}
           transition={{ duration:3, repeat:Infinity }}>
           <svg className="block size-full" fill="none" viewBox="0 0 259.946 217.681">
@@ -262,9 +404,9 @@ function GlobeView({
         {/* Legend */}
         {[['#ff0000','High Risk'],['#f70','Medium Risk'],['#00a21e','Low Risk']].map(([color,label],i) => (
           <div key={i} className="absolute flex gap-[8px] items-center left-[24px]"
-            style={{ top:`${490+i*23}px` }}>
+            style={{ bottom: `${70 + i*23}px` }}>
             <div className="h-[2px] rounded w-[24px]" style={{ background:color }} />
-            <p className="text-white text-[14px] font-['SF_Compact_Rounded:Regular',sans-serif]">{label}</p>
+            <p className="text-white text-[12px] font-['SF_Compact_Rounded:Regular',sans-serif]">{label}</p>
           </div>
         ))}
 
@@ -485,20 +627,213 @@ function AlertPanel({ satellites }: { satellites: Satellite[] }) {
           </div>
         </div>
         {alert ? (
-          <div className="grid grid-cols-2 gap-[8px] text-[13px] font-['SF_Pro_Rounded:Regular',sans-serif]">
+          <div className="grid grid-cols-2 gap-[8px] text-[12px] font-['SF_Pro_Rounded:Regular',sans-serif]">
             <p className="text-[#777]">Satellite</p><p className="text-white">{alert.name}</p>
             <p className="text-[#777]">Altitude</p><p className="text-white">{alert.altitude}</p>
             <p className="text-[#777]">Fuel</p><p className="text-white">{alert.propellant}</p>
             <p className="text-[#777]">Velocity</p><p className="text-white">{alert.velocity}</p>
           </div>
         ) : (
-          <p className="text-[#444] text-[12px]">No active conjunction threats detected.</p>
+          <p className="text-[#444] text-[11px]">No active conjunction threats detected.</p>
         )}
         {atRisk.length > 1 && (
-          <p className="text-[#ff8800] text-[11px] mt-[8px]">+{atRisk.length-1} more satellites at risk</p>
+          <p className="text-[#ff8800] text-[10px] mt-[8px]">+{atRisk.length-1} more satellites at risk</p>
         )}
       </motion.div>
     </div>
+  );
+}
+
+// ── Inline panel variants (sized for 320px right column) ─────────────────────
+function BullseyeRadarInline({ satellite, debrisList }: {
+  satellite: Satellite | undefined;
+  debrisList: {id:string; r:number[]}[];
+}) {
+  const CX = 210, CY = 205, R = 178;
+  return (
+    <div style={{
+  height: '100%',
+  display: 'flex',
+  flexDirection: 'column',
+
+  padding: '16px',        // inner space (you already had some)
+  margin: '15px',         // space outside
+  border: '2px solid black', // border
+  borderRadius:'10px',
+
+
+  background: '#0B1124',
+  boxSizing: 'border-box'
+}}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
+        <motion.div style={{ width: 6, height: 6, borderRadius: '50%', background: '#3a7fff', flexShrink: 0 }}
+          animate={{ opacity:[1,0.3,1] }} transition={{ duration:1.5, repeat:Infinity }} />
+        <p style={{ color: '#3a7fff', fontSize: 13, fontFamily: 'Azeret Mono, monospace', letterSpacing: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+          BULLSEYE — {satellite?.name ?? 'NO TARGET'}
+        </p>
+      </div>
+      <svg viewBox="-60 0 480 410" style={{ width: '100%', flex: 1, minHeight: 0, display: 'block' }}>
+        {[R, R*0.75, R*0.5, R*0.25].map((r, i) => (
+          <circle key={i} cx={CX} cy={CY} r={r} fill="none" stroke="#B3B3B3" strokeWidth="1" opacity={0.7} />
+        ))}
+        <line x1={CX-R-14} y1={CY} x2={CX+R+14} y2={CY} stroke="#B3B3B3" strokeWidth="0.7" />
+        <line x1={CX} y1={CY-R-14} x2={CX} y2={CY+R+14} stroke="#B3B3B3" strokeWidth="0.7" />
+        {[['N',CX-5,CY-R-16],['S',CX-5,CY+R+22],['W',CX-R-22,CY+5],['E',CX+R+8,CY+5]].map(([d,x,y])=>(
+          <text key={d as string} x={x as number} y={y as number} fill="#555" fontSize="11" fontFamily="Azeret Mono, monospace">{d}</text>
+        ))}
+        <g>
+          <line x1={CX} y1={CY} x2={CX+R} y2={CY} stroke="#3a7fff" strokeWidth="1.5" opacity="0.6">
+            <animateTransform
+              attributeName="transform"
+              type="rotate"
+              from={`0 ${CX} ${CY}`}
+              to={`360 ${CX} ${CY}`}
+              dur="3s"
+              repeatCount="indefinite"
+            />
+          </line>
+        </g>
+        <image href={imgSatellite} x={CX-18} y={CY-18} width="36" height="36" />
+        {satellite && debrisList.map((deb, idx) => {
+          if (!deb.r || deb.r.length < 3 || !satellite.r || satellite.r.length < 3) return null;
+          const dx = deb.r[0]-satellite.r[0], dy = deb.r[1]-satellite.r[1], dz = deb.r[2]-satellite.r[2];
+          const dist = Math.sqrt(dx*dx+dy*dy+dz*dz);
+          if (dist > 5000) return null;
+          const sc = R / 5000;
+          const rx = CX + dx * sc, ry = CY - dz * sc;
+          if (rx < 5 || rx > 415 || ry < 5 || ry > 405) return null;
+          const isClose = dist < 100;
+
+          return (
+            <g key={deb.id}>
+              <line x1={CX} y1={CY} x2={rx} y2={ry}
+                stroke={isClose ? '#ff6644' : '#f59e0b'}
+                strokeWidth="0.8" opacity="0.4" strokeDasharray="3 3" />
+              <motion.circle cx={rx} cy={ry} r={isClose ? 5 : 4}
+                fill={isClose ? '#ff4444' : '#f59e0b'}
+                animate={{ opacity: isClose ? [1,0.2,1] : [0.5,1,0.5] }}
+                transition={{ duration: isClose ? 0.8 : 2, repeat: Infinity }} />
+              <text x={rx+6} y={ry-4} fill={isClose ? '#ff6644' : '#f59e0b'}
+                fontSize="13" fontFamily="Azeret Mono, monospace">
+                BT-{String(idx+1).padStart(3,'0')}
+              </text>
+            </g>
+          );
+        })}
+        {[['1000km',CX+4,CY-R*0.25+5],['2500km',CX+4,CY-R*0.5+5],['5000km',CX+4,CY-R+5]].map(([l,x,y])=>(
+          <text key={l as string} x={x as number} y={y as number} fill="#2a3a55" fontSize="9" fontFamily="Azeret Mono, monospace">{l}</text>
+        ))}
+        {/* Stats overlay — bottom LEFT of SVG canvas (fixed viewBox coords 0 0 420 410) */}
+        {satellite && (
+          <g>
+            <rect x="-125" y="342" width="165" height="70" rx="5" fill="#0e1b2e" opacity="0.92" />
+            {/* <line x1="8" y1="373" x2="138" y2="373" stroke="#1a2a45" strokeWidth="0.7" /> */}
+            {/* <line x1="73" y1="342" x2="73" y2="404" stroke="#1a2a45" strokeWidth="0.7" /> */}
+            <text x="-36" y="357" fill="#8892a4" fontSize="9" fontFamily="Azeret Mono, monospace">Alt</text>
+            <text x="-36" y="370" fill="white" fontSize="12" fontFamily="Azeret Mono, monospace">{satellite.altitude}</text>
+            <text x="-120" y="357" fill="#8892a4" fontSize="9" fontFamily="Azeret Mono, monospace">Vel</text>
+            <text x="-120" y="370" fill="white" fontSize="12" fontFamily="Azeret Mono, monospace">{satellite.velocity}</text>
+            <text x="-36" y="389" fill="#8892a4" fontSize="9" fontFamily="Azeret Mono, monospace">Lat</text>
+            <text x="-36" y="402" fill="white" fontSize="12" fontFamily="Azeret Mono, monospace">{satellite.latitude}</text>
+            <text x="-120" y="389" fill="#8892a4" fontSize="9" fontFamily="Azeret Mono, monospace">Lon</text>
+            <text x="-120" y="402" fill="white" fontSize="12" fontFamily="Azeret Mono, monospace">{satellite.longitude}</text>
+          </g>
+        )}
+      </svg>
+    </div>
+  );
+}
+
+function TelemetryStatsPanelInline({ satellite }: { satellite: Satellite | undefined }) {
+  const sat = satellite;
+  const fuelPct = sat?.fuelPct ?? 0;
+  const isAtRisk = sat?.status === 'AT_RISK' || sat?.status === 'MANEUVERING';
+  return (
+    <div style={{
+  height: '100%',
+  display: 'flex',
+  flexDirection: 'column',
+
+  padding: '6px 16px 16px 16px',          // inner spacing
+  margin: '15px',           // space outside
+  border: '2px solid black', // border
+  borderRadius:'10px',
+
+  background: '#0A1124',
+  boxSizing: 'border-box'
+}}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6, background:'#0E1B2E' , marginBottom: 10, padding:5 }}>
+        <motion.div style={{ width: 6, height: 6, borderRadius: '50%', background: isAtRisk ? '#ff4444' : '#00ff88', flexShrink: 0 }}
+          animate={{ opacity:[1,0.3,1] }} transition={{ duration:1.5, repeat:Infinity }} />
+        <p style={{ color: 'white', fontSize: 11, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+          Telemetry: {sat?.name ?? '— Select satellite'}
+        </p>
+        {isAtRisk && <span style={{ marginLeft: 'auto', fontSize: 9, background: '#ff4444', color: 'white', padding: '2px 5px', borderRadius: 3, fontWeight: 700, flexShrink: 0 }}>{sat?.status}</span>}
+      </div>
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '8px 12px', flex: 1 }}>
+        {[['Altitude',sat?.altitude??'—'],['Longitude',sat?.longitude??'—'],['Propellant',sat?.propellant??'—'],
+          ['Latitude',sat?.latitude??'—'],['Velocity',sat?.velocity??'—'],['Status',sat?.status??'NOMINAL']
+        ].map(([label,value])=>(
+          <div key={label}>
+            <p style={{ color: '#444', fontSize: 9, marginBottom: 2 }}>{label}</p>
+            <p style={{ fontSize: 12, color: label==='Status'&&isAtRisk?'#ff4444':'white', fontWeight: 500 }}>{value}</p>
+          </div>
+        ))}
+      </div>
+      <div style={{ marginTop: 10 }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 5 }}>
+          <p style={{ color: '#666', fontSize: 10 }}>Fuel Reserve</p>
+          <p style={{ color: 'white', fontSize: 10 }}>{fuelPct.toFixed(0)}%</p>
+        </div>
+        <div style={{ height: 5, background: '#1a2540', borderRadius: 3, overflow: 'hidden' }}>
+          <motion.div style={{ height: '100%', borderRadius: 3, background: fuelPct>50?'linear-gradient(to right,#00ff88,#00cc66)':fuelPct>20?'linear-gradient(to right,#ff8800,#ffaa00)':'linear-gradient(to right,#ff4444,#ff8800)' }}
+            animate={{ width:`${fuelPct}%` }} transition={{ duration:1, ease:'easeOut' }} />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function AlertPanelInline({ satellites }: { satellites: Satellite[] }) {
+  const atRisk = satellites.filter(s => s.status==='AT_RISK'||s.status==='MANEUVERING');
+  const alert = atRisk[0];
+  return (
+    <motion.div style={{ 
+  height: '100%',
+
+  padding: '16px',           // inner spacing
+  margin: '16px',            // outer spacing
+  // full border
+  border: alert?'1px solid red':'2px solid black',
+  borderRadius:'10px',
+
+  background: '#0A1124',
+  boxSizing: 'border-box',
+  display: 'flex',
+  flexDirection: 'column'
+}}
+      animate={{ boxShadow: alert?['0 0 6px rgba(255,68,66,0.15)','0 0 12px rgba(255,68,66,0.3)','0 0 6px rgba(255,68,66,0.15)']:'none' }}
+      transition={{ duration:2, repeat: alert?Infinity:0 }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8, }}>
+        <p style={{ color: '#d2d2d2', fontSize: 13, fontWeight: 600 }}>
+          {alert ? `⚠ ALERT: ${alert.name}` : '✓ All Systems Nominal'}
+        </p>
+        <div style={{ border: `1px solid ${alert?'#ff4442':'#00ff88'}`, borderRadius: 4, padding: '2px 6px', flexShrink: 0 }}>
+          <p style={{ fontSize: 10, fontWeight: 700, color: alert?'#ff4442':'#00ff88' }}>{alert?alert.status:'NOMINAL'}</p>
+        </div>
+      </div>
+      {alert ? (
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '5px 8px', fontSize: 12 }}>
+          <p style={{ color: '#555' }}>Satellite</p><p style={{ color: 'white' }}>{alert.name}</p>
+          <p style={{ color: '#555' }}>Altitude</p><p style={{ color: 'white' }}>{alert.altitude}</p>
+          <p style={{ color: '#555' }}>Fuel</p><p style={{ color: 'white' }}>{alert.propellant}</p>
+          <p style={{ color: '#555' }}>Velocity</p><p style={{ color: 'white' }}>{alert.velocity}</p>
+        </div>
+      ) : (
+        <p style={{ color: '#2a2a3a', fontSize: 13 }}>No active conjunction threats detected.</p>
+      )}
+      {atRisk.length > 1 && <p style={{ color: '#ff8800', fontSize: 12, marginTop: 'auto', paddingTop: 6 }}>+{atRisk.length-1} more satellites at risk</p>}
+    </motion.div>
   );
 }
 
@@ -506,158 +841,255 @@ function AlertPanel({ satellites }: { satellites: Satellite[] }) {
 export default function EnhancedDashboard() {
   const { satellites: liveSats, debrisList, counts, connected, istTime } = useLiveData();
   const [selectedId, setSelectedId] = useState<string>('');
+  const [openTabIds, setOpenTabIds] = useState<string[]>([]);
+  const [showAddModal, setShowAddModal] = useState(false);
 
   const tableRows = liveSats.map(satToRow);
   const selectedSat = tableRows.find(s => s.id === selectedId) || tableRows[0];
 
-  // Auto-select first satellite
+  // Auto-open first satellite tab when data arrives
   useEffect(() => {
-    if (!selectedId && tableRows.length > 0) {
-      setSelectedId(tableRows[0].id);
+    if (tableRows.length > 0 && openTabIds.length === 0) {
+      const firstId = tableRows[0].id;
+      setOpenTabIds([firstId]);
+      setSelectedId(firstId);
     }
   }, [tableRows.length]);
 
-  const activeTabs = tableRows.slice(0, 4).map(s => ({ id:s.id, name:s.name }));
+  const activeTabs = openTabIds
+    .map(id => tableRows.find(s => s.id === id))
+    .filter(Boolean)
+    .map(s => ({ id: s!.id, name: s!.name }));
+
+  const handleSelectTab = (id: string) => setSelectedId(id);
+
+  const handleCloseTab = (id: string) => {
+    const remaining = openTabIds.filter(t => t !== id);
+    setOpenTabIds(remaining);
+    if (selectedId === id) setSelectedId(remaining[remaining.length - 1] ?? '');
+  };
+
+  const handleAddSatellite = (id: string) => {
+    if (!openTabIds.includes(id)) setOpenTabIds(prev => [...prev, id]);
+    setSelectedId(id);
+    setShowAddModal(false);
+  };
 
   return (
     <Tooltip.Provider>
-      <div className="bg-[#03020e] relative size-full overflow-auto">
+      {/* ── ROOT: fills parent App container ── */}
+      <div style={{
+        background: '#03020e',
+        width: '100%',
+        minHeight: '100vh', 
+        gridTemplateRows: '48px 500px 200px',
+        display: 'grid',
+        gridTemplateColumns: '1fr 38%',
+        fontFamily: 'SF Compact Rounded, sans-serif',
+        boxSizing: 'border-box',
+      }}>
 
-        {/* Header */}
-        <div className="absolute flex gap-[10px] items-center left-[30px] top-[24px]">
-          <p className="font-['SF_Compact_Rounded:Regular',sans-serif] text-[32px] text-white whitespace-nowrap">
-            Project Aether
-          </p>
-          <img alt="" src={imgSatellite} className="w-[28px] h-[28px]" />
-          <motion.div
-            className="w-[10px] h-[10px] rounded-full ml-[4px]"
-            style={{ background: connected ? '#00ff88' : '#ff4444' }}
-            animate={{ opacity: connected ? [1,0.5,1] : 1 }}
-            transition={{ duration:1.5, repeat: connected ? Infinity : 0 }}
-            title={connected ? 'Backend connected' : 'Disconnected'}
-          />
-        </div>
+        {/* ══ ROW 1: HEADER ══ */}
+        <div style={{
+          gridRow: 1,
+          gridColumn: '1 / 3',
+          display: 'grid',
+          gridTemplateColumns: 'auto 1fr auto',
+          alignItems: 'center',
+          borderBottom: '1px solid #1e1e30',
+          padding: '0 16px',
+          gap: 12,
+          background: '#06060f',
+        }}>
+          {/* Title */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <p style={{ color: 'white', fontSize: 18, fontWeight: 600, whiteSpace: 'nowrap', letterSpacing: '0.04em' }}>Project Aether</p>
+            <img alt="" src={imgSatellite} style={{ width: 18, height: 18 }} />
+            <motion.div
+              style={{ width: 7, height: 7, borderRadius: '50%', background: connected ? '#00ff88' : '#ff4444' }}
+              animate={{ opacity: connected ? [1, 0.4, 1] : 1 }}
+              transition={{ duration: 1.5, repeat: connected ? Infinity : 0 }}
+              title={connected ? 'Backend connected' : 'Disconnected'}
+            />
+          </div>
 
-        {/* Satellite tabs */}
-        <div className="absolute left-[299px] top-[28px] right-[400px]">
-          <SatelliteTabs
-            satellites={activeTabs}
-            activeSatelliteId={selectedId}
-            onSelectSatellite={setSelectedId}
-            onCloseSatellite={() => {}}
-            onAddSatellite={() => {}}
-          />
-        </div>
+          {/* Satellite tabs */}
+          <div style={{ overflow: 'hidden', minWidth: 0 }}>
+            <SatelliteTabs
+              satellites={activeTabs}
+              activeSatelliteId={selectedId}
+              onSelectSatellite={handleSelectTab}
+              onCloseSatellite={handleCloseTab}
+              onAddSatellite={() => setShowAddModal(true)}
+            />
+          </div>
 
-        {/* Top stats */}
-        <div className="absolute flex gap-[32px] items-center right-[30px] top-[20px]">
-          {[
-            { icon: imgSatellite, label:'Satellites', value: String(counts.satellites).padStart(2,'0'), img:true },
-            { label:'Debris',    value: String(counts.debris).padStart(2,'0'),    color:'#D9D9D9' },
-            { icon: imgWarning,  label:'Alerts',      value: String(counts.at_risk).padStart(2,'0'), img:true, alert: counts.at_risk > 0 },
-          ].map((item, i) => (
-            <div key={i} className="flex gap-[10px] items-center">
-              <div className="w-[28px] h-[28px] flex items-center justify-center">
-                {item.img ? (
-                  <motion.img src={(item as any).icon} className="w-full h-full"
-                    animate={(item as any).alert ? { opacity:[1,0.5,1] } : {}}
-                    transition={{ duration:1, repeat: Infinity }} />
-                ) : (
-                  <svg viewBox="0 0 28 28" className="w-full h-full">
-                    <circle cx="14" cy="14" r="14" fill={(item as any).color || '#888'} />
-                  </svg>
-                )}
+          {/* Stats + clock */}
+          <div style={{ display: 'flex', gap: 20, alignItems: 'center' }}>
+            {[
+              { icon: imgSatellite, label: 'Satellites', value: String(counts.satellites).padStart(2,'0'), img: true },
+              { label: 'Debris',    value: String(counts.debris).padStart(2,'0'), color: '#D9D9D9' },
+              { icon: imgWarning,   label: 'Alerts',     value: String(counts.at_risk).padStart(2,'0'), img: true, alert: counts.at_risk > 0 },
+            ].map((item, i) => (
+              <div key={i} style={{ display: 'flex', gap: 7, alignItems: 'center' }}>
+                <div style={{ width: 20, height: 20 }}>
+                  {item.img ? (
+                    <motion.img src={(item as any).icon} style={{ width: '100%', height: '100%' }}
+                      animate={(item as any).alert ? { opacity:[1,0.5,1] } : {}}
+                      transition={{ duration:1, repeat: Infinity }} />
+                  ) : (
+                    <svg viewBox="0 0 20 20" style={{ width: '100%', height: '100%' }}>
+                      <circle cx="10" cy="10" r="10" fill={(item as any).color || '#888'} />
+                    </svg>
+                  )}
+                </div>
+                <div>
+                  <p style={{ color: '#888', fontSize: 10, lineHeight: 1 }}>{item.label}</p>
+                  <p style={{ fontSize: 13, fontWeight: 600, color: (item as any).alert ? '#ff4444' : 'white', lineHeight: 1.3 }}>{item.value}</p>
+                </div>
               </div>
-              <div>
-                <p className="text-[#d2d2d2] text-[16px] font-['SF_Compact_Rounded:Regular',sans-serif]">{item.label}</p>
-                <p className={`text-[18px] font-['SF_Compact_Rounded:Regular',sans-serif] ${(item as any).alert ? 'text-[#ff4444]' : 'text-white'}`}>
-                  {item.value}
-                </p>
-              </div>
-            </div>
-          ))}
-          {/* IST clock */}
-          <div className="flex gap-[10px] items-center">
-            <div className="w-[28px] h-[28px]">
-              <svg viewBox="0 0 27 29" fill="none" className="w-full h-full">
+            ))}
+            <div style={{ display: 'flex', gap: 7, alignItems: 'center' }}>
+              <svg viewBox="0 0 27 29" fill="none" style={{ width: 20, height: 20 }}>
                 <path d={svgPaths.p3cc36df0} fill="white" />
               </svg>
-            </div>
-            <div>
-              <p className="text-[#d2d2d2] text-[16px] font-['SF_Compact_Rounded:Regular',sans-serif]">IST Time</p>
-              <p className="text-white text-[18px] font-['SF_Compact_Rounded:Regular',sans-serif]">{istTime}</p>
+              <div>
+                <p style={{ color: '#888', fontSize: 10, lineHeight: 1 }}>IST Time</p>
+                <p style={{ color: 'white', fontSize: 13, fontWeight: 600, lineHeight: 1.3 }}>{istTime}</p>
+              </div>
             </div>
           </div>
         </div>
 
-        {/* Divider */}
-        <div className="absolute h-px bg-[#606060] left-[31px] right-[31px] top-[70px]" />
+        {/* ══ ROW 2: GLOBE (left column only) ══ */}
+        <div style={{
+          gridRow: 2,
+          gridColumn: 1,
+          position: 'relative',
+          overflow: 'hidden',
+          borderRight: '1px solid #1a1a2e',
+        }}>
+          <GlobeView satellites={tableRows} debrisList={debrisList} selectedId={selectedId} onSelect={setSelectedId} />
+        </div>
 
-        {/* Globe */}
-        <GlobeView satellites={tableRows} debrisList={debrisList} selectedId={selectedId} onSelect={setSelectedId} />
+        {/* ══ RIGHT COLUMN: spans ROW 2 + ROW 3 ══ */}
+        <div style={{
+          gridRow: '2 / 4',
+          gridColumn: 2,
+          display: 'grid',
+          // gridTemplateRows: '3fr 1fr 1fr',
+          gridTemplateRows: '3fr 1.5fr 1.5fr', 
+          overflow: 'hidden',
+          background: '#07070f',
+          borderLeft: '1px solid #1a1a2e',
+        }}>
+          {/* Bullseye Radar */}
+          <div style={{ overflow: 'hidden', borderBottom: '1px solid #1a1a2e' }}>
+            <BullseyeRadarInline satellite={selectedSat} debrisList={debrisList} />
+          </div>
+          {/* Telemetry Stats */}
+          <div style={{ overflow: 'hidden', borderBottom: '1px solid #1a1a2e' }}>
+            <TelemetryStatsPanelInline satellite={selectedSat} />
+          </div>
+          {/* Alert Panel */}
+          <div style={{ overflow: 'hidden' }}>
+            <AlertPanelInline satellites={tableRows} />
+          </div>
+        </div>
 
-        {/* Bullseye Radar — shows selected satellite */}
-        <BullseyeRadar satellite={selectedSat} debrisList={debrisList} />
+        {/* ══ ROW 3: SATELLITE TABLE + TELEMETRY LOG (left column only) ══ */}
+        <div style={{
+          gridRow: 3,
+          gridColumn: 1,
+          display: 'grid',
+          gridTemplateRows: '24px 26px 1fr 80px',  
+          borderTop: '1px solid #1e1e30',
+          overflow: 'hidden',
+          background: '#05050e',
+        }}>
+          {/* Section label */}
+          <div style={{ display: 'flex', alignItems: 'center', padding: '0 16px', borderBottom: '1px solid #151522' }}>
+            <p style={{ color: '#555', fontSize: 10, fontFamily: 'Azeret Mono, monospace', letterSpacing: 2 }}>SATELLITES</p>
+          </div>
 
-        {/* Satellite Table */}
-        <div className="absolute left-[31px] top-[758px] w-[1333px]">
-          <p className="absolute font-['Azeret_Mono:Regular',sans-serif] text-[12px] text-white left-[16px] top-[10px]">Satellites</p>
-          <div className="absolute h-px bg-[#606060] left-0 right-0 top-[37px]" />
-
-          {/* Header */}
-          <div className="absolute grid left-0 right-0 top-[37px] h-[32px] items-center px-[20px] text-[#777] text-[13px]"
-            style={{ gridTemplateColumns:'2fr 0.8fr 0.8fr 1fr 1fr 1fr 1fr 1.2fr 0.8fr' }}>
-            {['Satellite','Az','El','Altitude','Latitude','Longitude','Velocity','Propellant','Debris'].map(h=>(
-              <p key={h} className="font-['SF_Compact_Rounded:Regular',sans-serif] truncate">{h}</p>
+          {/* Table header */}
+          <div style={{
+            display: 'grid',
+            gridTemplateColumns: '2fr 0.5fr 0.5fr 1fr 1fr 1fr 1fr 1fr 0.6fr',
+            alignItems: 'center',
+            padding: '0 16px',
+            borderBottom: '1px solid #151522',
+          }}>
+            {['Satellite','Az','El','Altitude','Latitude','Longitude','Velocity','Propellant','Debris'].map(h => (
+              <p key={h} style={{ color: '#444', fontSize: 10, fontFamily: 'Azeret Mono, monospace', letterSpacing: 0.5 }}>{h}</p>
             ))}
           </div>
 
-          {/* Rows */}
-          {tableRows.length === 0 ? (
-            <div className="absolute left-0 right-0 top-[69px] h-[32px] flex items-center px-[20px]">
-              <p className="text-[#444] text-[13px]">Waiting for telemetry from backend...</p>
-            </div>
-          ) : (
-            tableRows.map((sat, i) => {
-              const isSelected = sat.id === selectedId;
-              const isAtRisk   = sat.status==='AT_RISK'||sat.status==='MANEUVERING';
-              return (
-                <motion.div key={sat.id}
-                  className="absolute grid left-0 right-0 h-[32px] items-center px-[20px] cursor-pointer text-[13px]"
-                  style={{
-                    top: `${69+i*33}px`,
-                    gridTemplateColumns:'2fr 0.8fr 0.8fr 1fr 1fr 1fr 1fr 1.2fr 0.8fr',
-                    background: isSelected ? 'rgba(58,127,255,0.12)' : 'transparent',
-                    borderLeft: isSelected ? '2px solid #3a7fff' : '2px solid transparent',
-                    color: isAtRisk ? '#ff9944' : 'white',
-                  }}
-                  onClick={() => setSelectedId(sat.id)}
-                  whileHover={{ backgroundColor:'rgba(255,255,255,0.04)' }}
-                  transition={{ duration:0.15 }}>
-                  <p className="truncate font-['SF_Compact_Rounded:Regular',sans-serif]">{sat.name}</p>
-                  <p className="truncate font-['SF_Compact_Rounded:Regular',sans-serif]">{sat.az}</p>
-                  <p className="truncate font-['SF_Compact_Rounded:Regular',sans-serif]">{sat.el}</p>
-                  <p className="truncate font-['SF_Compact_Rounded:Regular',sans-serif]">{sat.altitude}</p>
-                  <p className="truncate font-['SF_Compact_Rounded:Regular',sans-serif]">{sat.latitude}</p>
-                  <p className="truncate font-['SF_Compact_Rounded:Regular',sans-serif]">{sat.longitude}</p>
-                  <p className="truncate font-['SF_Compact_Rounded:Regular',sans-serif]">{sat.velocity}</p>
-                  <p className="truncate font-['SF_Compact_Rounded:Regular',sans-serif]">{sat.propellant}</p>
-                  <p className="truncate font-['SF_Compact_Rounded:Regular',sans-serif]">{sat.debris}</p>
-                </motion.div>
-              );
-            })
-          )}
+          {/* Table rows */}
+          <div style={{ overflowY: 'auto', scrollbarWidth: 'thin', scrollbarColor: '#2a2a3a #05050e' }}>
+            {tableRows.length === 0 ? (
+              <p style={{ color: '#2a2a3a', fontSize: 11, padding: '6px 16px' }}>Waiting for telemetry from backend...</p>
+            ) : (
+              tableRows.map((sat) => {
+                const isSelected = sat.id === selectedId;
+                const isAtRisk   = sat.status === 'AT_RISK' || sat.status === 'MANEUVERING';
+                return (
+                  <motion.div key={sat.id}
+                    style={{
+                      display: 'grid',
+                      gridTemplateColumns: '2fr 0.5fr 0.5fr 1fr 1fr 1fr 1fr 1fr 0.6fr',
+                      alignItems: 'center',
+                      padding: '3px 16px',
+                      cursor: 'pointer',
+                      background: isSelected ? 'rgba(58,127,255,0.09)' : 'transparent',
+                      borderLeft: isSelected ? '2px solid #3a7fff' : '2px solid transparent',
+                      color: isAtRisk ? '#ff9944' : '#e0e0e0',
+                      fontSize: 11,
+                    }}
+                    onClick={() => setSelectedId(sat.id)}
+                    whileHover={{ backgroundColor: 'rgba(255,255,255,0.03)' }}>
+                    {[sat.name,sat.az,sat.el,sat.altitude,sat.latitude,sat.longitude,sat.velocity,sat.propellant,sat.debris].map((v, j) => (
+                      <p key={j} style={{ overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{v}</p>
+                    ))}
+                  </motion.div>
+                );
+              })
+            )}
+          </div>
+
+          {/* Telemetry log strip */}
+          <div style={{ borderTop: '1px solid #151522', overflow: 'visible' }}>
+            <TelemetryLog selectedSatellite={selectedSat} />
+          </div>
         </div>
 
-        {/* Telemetry Log */}
-        <div className="absolute left-[31px] top-[920px] w-[1333px]">
-          <TelemetryLog selectedSatellite={selectedSat} />
-        </div>
-
-        {/* Right panels */}
-        <TelemetryStatsPanel satellite={selectedSat} />
-        <AlertPanel satellites={tableRows} />
       </div>
+
+      {/* ── Add Satellite Modal ── */}
+      {showAddModal && (
+        <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.7)', zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+          onClick={() => setShowAddModal(false)}>
+          <div style={{ background: '#0a0d1a', border: '1px solid #1f3c5e', borderRadius: 10, padding: '20px 24px', minWidth: 300, maxHeight: 400, overflowY: 'auto' }}
+            onClick={e => e.stopPropagation()}>
+            <p style={{ color: 'white', fontSize: 13, fontWeight: 600, marginBottom: 14, letterSpacing: 1 }}>SELECT SATELLITE</p>
+            {tableRows.filter(s => !openTabIds.includes(s.id)).length === 0 ? (
+              <p style={{ color: '#8892a4', fontSize: 11 }}>All satellites already open.</p>
+            ) : (
+              tableRows.filter(s => !openTabIds.includes(s.id)).map(s => (
+                <div key={s.id}
+                  onClick={() => handleAddSatellite(s.id)}
+                  style={{ padding: '8px 12px', borderRadius: 6, cursor: 'pointer', marginBottom: 4, background: '#0e1a2e', border: '1px solid #1f3c5e', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}
+                  onMouseEnter={e => (e.currentTarget.style.borderColor = '#3a7fff')}
+                  onMouseLeave={e => (e.currentTarget.style.borderColor = '#1f3c5e')}>
+                  <p style={{ color: 'white', fontSize: 12 }}>{s.name}</p>
+                  <p style={{ color: '#8892a4', fontSize: 10 }}>{s.altitude}</p>
+                </div>
+              ))
+            )}
+          </div>
+        </div>
+      )}
+
     </Tooltip.Provider>
   );
 }

@@ -149,7 +149,7 @@ export function TelemetryLog({ selectedSatellite }: TelemetryLogProps = {}) {
   }, [logs]);
 
   return (
-    <div className="bg-[#05070d] border border-[#1f3c5e] rounded-[6px] p-[16px] h-[400px] flex flex-col font-['JetBrains_Mono',monospace]">
+    <div className="bg-[#05070d] border border-[#1f3c5e] rounded-[6px] p-[16px] h-full flex flex-col font-['JetBrains_Mono',monospace]">
       {/* Header */}
       <div className="flex items-center justify-between mb-[12px] pb-[8px] border-b border-[#1f3c5e]">
         <div className="flex items-center gap-[8px]">

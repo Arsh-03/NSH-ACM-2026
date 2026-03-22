@@ -5,6 +5,6 @@ import "./styles/index.css";
 const root = document.getElementById("root")!;
 root.style.width = "100%";
 root.style.height = "100%";
-root.style.overflow = "auto";
+root.style.overflow = "hidden";
 
 createRoot(root).render(<App />);
