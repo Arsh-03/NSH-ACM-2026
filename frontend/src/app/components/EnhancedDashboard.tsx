@@ -19,7 +19,7 @@ interface Satellite {
   id: string; name: string; az: string; el: string;
   altitude: string; latitude: string; longitude: string;
   velocity: string; propellant: string; debris: string;
-  status: string; fuelPct: number;
+  status: string; fuelPct: number; gs: string;
   r: number[]; v: number[];
 }
 
@@ -35,37 +35,57 @@ function eciToGlobe(r: number[], cx: number, cy: number, radius: number) {
   return { px, py, lat, lon };
 }
 
-// ── Az/El from ISTRAC Bengaluru (GS-001) ─────────────────────────────────────
-const GS_LAT = 13.0333 * Math.PI / 180;
-const GS_LON = 77.5167 * Math.PI / 180;
-const GS_ALT = 0.820;
+// ── Az/El from best visible ground station ───────────────────────────────────
+const GROUND_STATIONS = [
+  { name:'ISTRAC',    lat:13.0333,  lon:77.5167,   alt:0.820 },
+  { name:'Svalbard',  lat:78.2297,  lon:15.4077,   alt:0.400 },
+  { name:'Goldstone', lat:35.4266,  lon:-116.8900, alt:1.000 },
+  { name:'PuntaArenas',lat:-53.1500,lon:-70.9167,  alt:0.030 },
+  { name:'IIT-Delhi', lat:28.5450,  lon:77.1926,   alt:0.225 },
+  { name:'McMurdo',   lat:-77.8463, lon:166.6682,  alt:0.010 },
+];
 
-function getAzEl(satR: number[]): { az: string; el: string } {
-  const RE = 6378.137;
-  const gsX = (RE+GS_ALT)*Math.cos(GS_LAT)*Math.cos(GS_LON);
-  const gsY = (RE+GS_ALT)*Math.cos(GS_LAT)*Math.sin(GS_LON);
-  const gsZ = (RE+GS_ALT)*Math.sin(GS_LAT);
-
-  const rx = satR[0]-gsX, ry = satR[1]-gsY, rz = satR[2]-gsZ;
-  const rangeMag = Math.sqrt(rx*rx+ry*ry+rz*rz);
-
-  const sinLat=Math.sin(GS_LAT), cosLat=Math.cos(GS_LAT);
-  const sinLon=Math.sin(GS_LON), cosLon=Math.cos(GS_LON);
-
-  const ex=-sinLon,   ey=cosLon,            ez=0;
-  const nx=-sinLat*cosLon, ny=-sinLat*sinLon, nz=cosLat;
-  const zx= cosLat*cosLon, zy= cosLat*sinLon, zz=sinLat;
-
-  const E=rx*ex+ry*ey+rz*ez;
-  const N=rx*nx+ry*ny+rz*nz;
-  const Z=rx*zx+ry*zy+rz*zz;
-
-  const elDeg=(Math.asin(Z/rangeMag))*180/Math.PI;
-  if (elDeg < 0) return { az:'—', el:'—' };
-
-  let azDeg=Math.atan2(E,N)*180/Math.PI;
+function computeAzEl(satR: number[], latDeg: number, lonDeg: number, altKm: number) {
+  const RE  = 6378.137;
+  const lat = latDeg * Math.PI / 180;
+  const lon = lonDeg * Math.PI / 180;
+  const gsX = (RE+altKm)*Math.cos(lat)*Math.cos(lon);
+  const gsY = (RE+altKm)*Math.cos(lat)*Math.sin(lon);
+  const gsZ = (RE+altKm)*Math.sin(lat);
+  const rx=satR[0]-gsX, ry=satR[1]-gsY, rz=satR[2]-gsZ;
+  const rng=Math.sqrt(rx*rx+ry*ry+rz*rz);
+  const sinLat=Math.sin(lat), cosLat=Math.cos(lat);
+  const sinLon=Math.sin(lon), cosLon=Math.cos(lon);
+  const E=rx*(-sinLon)+ry*(cosLon);
+  const N=rx*(-sinLat*cosLon)+ry*(-sinLat*sinLon)+rz*cosLat;
+  const Z=rx*(cosLat*cosLon)+ry*(cosLat*sinLon)+rz*sinLat;
+  const elDeg=Math.asin(Z/rng)*180/Math.PI;
+  let   azDeg=Math.atan2(E,N)*180/Math.PI;
   if (azDeg<0) azDeg+=360;
-  return { az:azDeg.toFixed(1), el:elDeg.toFixed(1) };
+  return { elDeg, azDeg };
+}
+
+function getAzEl(satR: number[]): { az: string; el: string; gs: string } {
+  // Find ground station with highest elevation angle
+  let bestEl  = -Infinity;
+  let bestAz  = 0;
+  let bestGs  = '';
+
+  for (const gs of GROUND_STATIONS) {
+    const { elDeg, azDeg } = computeAzEl(satR, gs.lat, gs.lon, gs.alt);
+    if (elDeg > bestEl) {
+      bestEl = elDeg;
+      bestAz = azDeg;
+      bestGs = gs.name;
+    }
+  }
+
+  // Always show best angle even if below horizon (show negative El)
+  return {
+    az: bestAz.toFixed(1) + '°',
+    el: bestEl.toFixed(1) + '°',
+    gs: bestGs,
+  };
 }
 
 function countNearbyDebris(satR: number[], debrisList: {r:number[]}[]): number {
@@ -84,11 +104,11 @@ function satToRow(sat: LiveSat, debrisList: {id:string;r:number[];v:number[]}[] 
   const lat  = Math.asin(Math.max(-1,Math.min(1,rn[2])))*180/Math.PI;
   const lon  = Math.atan2(rn[1],rn[0])*180/Math.PI;
   const fuelPct = Math.min(100,(sat.fuel/50)*100);
-  const { az, el } = getAzEl(sat.r);
+  const { az, el, gs } = getAzEl(sat.r);
   const nearbyDebris = countNearbyDebris(sat.r, debrisList);
   return {
     id: sat.id, name: sat.id,
-    az, el,
+    az, el, gs,
     altitude:   `${alt.toFixed(1)} km`,
     latitude:   `${lat.toFixed(4)}°`,
     longitude:  `${lon.toFixed(4)}°`,
@@ -516,7 +536,7 @@ function TelemetryStatsPanelInline({ satellite }: { satellite: Satellite | undef
         ))}
       </div>
       <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr 1fr', gap:'4px 10px', marginBottom:6 }}>
-        {[['Az (ISTRAC)',sat?.az??'—'],['El (ISTRAC)',sat?.el??'—'],['Nearby Debris',sat?.debris??'0']].map(([label,value])=>(
+        {[[`Az (${sat?.gs??'GS'})`,sat?.az??'—'],[`El (${sat?.gs??'GS'})`,sat?.el??'—'],['Nearby Debris',sat?.debris??'0']].map(([label,value])=>(
           <div key={label}>
             <p style={{ color:'#444', fontSize:9, marginBottom:1 }}>{label}</p>
             <p style={{ fontSize:11, color:'white', fontWeight:500 }}>{value}</p>
