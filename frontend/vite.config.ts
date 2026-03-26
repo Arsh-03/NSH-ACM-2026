@@ -14,7 +14,7 @@ export default defineConfig({
     },
   },
   // Added png to assetsInclude so Vite handles local image imports correctly
-  assetsInclude: ['**/*.svg', '**/*.csv', '**/*.png'],
+  assetsInclude: ['**/*.svg', '**/*.csv', '**/*.png', '**/*.jpg', '**/*.jpeg'],
   server: {
     proxy: {
       // Proxy REST API calls to FastAPI backend

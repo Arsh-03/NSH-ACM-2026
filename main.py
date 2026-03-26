@@ -2,6 +2,7 @@ import uvicorn
 import asyncio
 import json
 import time
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
@@ -11,8 +12,16 @@ from fastapi.websockets import WebSocketState
 from src.api import telemetry, simulation, maneuvers
 from src.ai.auto_pilot import run_auto_pilot
 
+# ── Lifespan ──────────────────────────────────────────────────────────────────
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup
+    asyncio.create_task(run_auto_pilot())
+    yield
+    # Shutdown (if needed)
+
 # ── App ───────────────────────────────────────────────────────────────────────
-app = FastAPI(title="NSH-ACM-2026 Mission Control")
+app = FastAPI(title="NSH-ACM-2026 Mission Control", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -164,12 +173,6 @@ async def health_check():
         "satellites":  int(sats),
         "ws_clients":  int(len(connected_clients)),
     }
-
-
-# ── Startup ───────────────────────────────────────────────────────────────────
-@app.on_event("startup")
-async def startup_event():
-    asyncio.create_task(run_auto_pilot())
 
 
 # ── Serve frontend (uncomment after npm run build) ────────────────────────────
