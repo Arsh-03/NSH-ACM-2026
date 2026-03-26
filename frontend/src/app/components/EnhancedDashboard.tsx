@@ -117,141 +117,7 @@ function useLiveData() {
   return { satellites, debrisList, counts, connected, istTime };
 }
 
-// ── Canvas Globe — true Y-axis Earth rotation ─────────────────────────────────
-function GlobeCanvas({ cx, cy, radius, textureSrc }: {
-  cx: number; cy: number; radius: number; textureSrc: string;
-}) {
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-  const imgRef    = useRef<HTMLImageElement | null>(null);
-  const offsetRef = useRef(0);
-  const rafRef    = useRef<number>(0);
-  const D = radius * 2;
-
-  useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return;
-
-    const img = new Image();
-    img.crossOrigin = "anonymous";
-    img.src = textureSrc;
-    imgRef.current = img;
-
-    const draw = () => {
-      // Decrease offset → texture scrolls right, globe appears to spin left-to-right
-      offsetRef.current = (offsetRef.current - (D * 2) / (60 * 60) + D * 2) % (D * 2);
-      const off = offsetRef.current;
-
-      ctx.clearRect(0, 0, D + 20, D + 20);
-
-      ctx.save();
-      ctx.beginPath();
-      ctx.arc(radius + 10, radius + 10, radius, 0, Math.PI * 2);
-      ctx.clip();
-
-      if (img.complete && img.naturalWidth > 0) {
-        const tw = D * 2;
-        const th = D;
-        ctx.drawImage(img, 10 - off,          10, tw, th);
-        ctx.drawImage(img, 10 + tw - off,      10, tw, th);
-        ctx.drawImage(img, 10 - tw - off + tw, 10, tw, th);
-      } else {
-        ctx.fillStyle = "#0a1628";
-        ctx.fillRect(0, 0, D + 20, D + 20);
-      }
-
-      // Terminator — thin night crescent on left edge only, globe mostly fully lit
-      const cx2 = radius + 10;
-      const cy2 = radius + 10;
-
-      // Main shadow: darkens only the left rim, fades quickly toward center
-      const shadow = ctx.createRadialGradient(
-      cx2 * 1.45, cy2, radius * 0.1,   // light source on RIGHT ✅
-      cx2 * 1.4,  cy2, radius * 1.02   // bring darkness closer to LEFT EDGE
-      );
-      shadow.addColorStop(0,    "rgba(0,0,0,0)");
-      shadow.addColorStop(0.55, "rgba(0,0,0,0)");
-      shadow.addColorStop(0.72, "rgba(0,0,10,0.30)");
-      shadow.addColorStop(0.87, "rgba(0,0,15,0.68)");
-      shadow.addColorStop(1,    "rgba(0,0,20,0.90)");
-      ctx.fillStyle = shadow;
-      ctx.fillRect(0, 0, D + 20, D + 20);
-
-      // Specular highlight — top-right, light source from east
-      const spec = ctx.createRadialGradient(
-        (radius + 10) * 1.62, (radius + 10) * 0.32, 0,
-        (radius + 10) * 1.62, (radius + 10) * 0.32, radius * 0.48
-      );
-      spec.addColorStop(0,   "rgba(200,220,255,0.10)");
-      spec.addColorStop(0.3, "rgba(180,200,255,0.04)");
-      spec.addColorStop(1,   "rgba(0,0,0,0)");
-      ctx.fillStyle = spec;
-      ctx.fillRect(0, 0, D + 20, D + 20);
-
-      // Edge darkening — strong dark rim
-      // const edge = ctx.createRadialGradient(radius+10, radius+10, radius * 0.65, radius+10, radius+10, radius);
-      // edge.addColorStop(0,    "rgba(0,0,8,0)");
-      // edge.addColorStop(0.6,  "rgba(0,0,8,0.10)");
-      // edge.addColorStop(1,    "rgba(0,0,8,0.82)");
-      // ctx.fillStyle = edge;
-      // ctx.fillRect(0, 0, D + 20, D + 20);
-      const edge = ctx.createRadialGradient(
-        radius+10, radius+10, radius * 0.85,
-        radius+10, radius+10, radius
-      );
-      edge.addColorStop(0,   "rgba(0,0,0,0)");
-      edge.addColorStop(1,   "rgba(0,0,0,0.25)");
-      ctx.fillStyle = edge;
-      ctx.fillRect(0, 0, D + 20, D + 20);
-
-      ctx.restore();
-
-      // Atmosphere rim — vivid thin blue ring around entire globe edge
-      // Atmosphere — OUTWARD glow (correct NASA style)
-      const atmo = ctx.createRadialGradient(
-        radius+10, radius+10, radius * 0.98,   // start EXACTLY at edge
-        radius+10, radius+10, radius * 1.08    // expand OUTWARD
-      );
-
-      atmo.addColorStop(0,    "rgba(80,140,255,0.0)");  // no glow inside
-      atmo.addColorStop(0.1,  "rgba(80,140,255,0.6)");  // strong rim
-      atmo.addColorStop(0.25, "rgba(60,120,255,0.8)");  // peak glow
-      atmo.addColorStop(0.45, "rgba(50,100,255,0.5)");  // fading
-      atmo.addColorStop(0.7,  "rgba(30,70,220,0.25)");  // soft fade
-      atmo.addColorStop(1,    "rgba(0,0,0,0)");         // fully gone
-
-      ctx.fillStyle = atmo;
-      ctx.beginPath();
-      ctx.arc(radius+10, radius+10, radius * 1.25, 0, Math.PI * 2);
-      ctx.fill();
-
-      rafRef.current = requestAnimationFrame(draw);
-    };
-
-    img.onload  = () => { rafRef.current = requestAnimationFrame(draw); };
-    img.onerror = () => { rafRef.current = requestAnimationFrame(draw); };
-
-    return () => cancelAnimationFrame(rafRef.current);
-  }, [textureSrc, D, radius]);
-
-  const size = D + 20;
-  return (
-    <canvas
-      ref={canvasRef}
-      width={size}
-      height={size}
-      style={{
-        position: "absolute",
-        left: cx - radius - 10,
-        top:  cy - radius - 10,
-        pointerEvents: "none",
-      }}
-    />
-  );
-}
-
-// ── Globe with all satellites ─────────────────────────────────────────────────
+// ── Three.js Globe ───────────────────────────────────────────────────────────
 function GlobeView({
   satellites, debrisList, selectedId, onSelect
 }: {
@@ -260,172 +126,309 @@ function GlobeView({
   selectedId: string;
   onSelect: (id: string) => void;
 }) {
-  const containerRef = useRef<HTMLDivElement>(null);
-  const [dims, setDims] = useState({ w: 900, h: 500 });
+  const mountRef    = useRef<HTMLDivElement>(null);
+  const sceneRef    = useRef<any>(null);
+  const cameraRef   = useRef<any>(null);
+  const rendererRef = useRef<any>(null);
+  const globeRef    = useRef<any>(null);
+  const groupRef    = useRef<any>(null);   // globe + satellites group
+  const rafRef      = useRef<number>(0);
+  const dragRef     = useRef({ dragging: false, lastX: 0, lastY: 0, velX: 0, velY: 0 });
+  const rotRef      = useRef({ x: 0.3, y: 0 });
+  const autoSpinRef = useRef(true);
+  const satMeshesRef = useRef<Record<string, any>>({});
+  const orbitLinesRef = useRef<Record<string, any>>({});
+  const debrisMeshesRef = useRef<Record<string, any>>({});
+  const [THREE, setTHREE] = useState<any>(null);
+  const [ready, setReady] = useState(false);
 
+  // Load Three.js dynamically
   useEffect(() => {
-    const el = containerRef.current;
-    if (!el) return;
-    const obs = new ResizeObserver(entries => {
-      for (const e of entries) {
-        setDims({ w: e.contentRect.width, h: e.contentRect.height });
-      }
+    import('three').then(mod => {
+      setTHREE(mod);
     });
-    obs.observe(el);
-    return () => obs.disconnect();
   }, []);
 
-  const CX = dims.w * 0.45;
-  const CY = dims.h * 0.50;
-  const GLOBE_R = Math.min(dims.w * 0.28, dims.h * 0.42, 200);
+  // Init scene
+  useEffect(() => {
+    if (!THREE || !mountRef.current) return;
+    const el = mountRef.current;
+    const W = el.clientWidth || 800;
+    const H = el.clientHeight || 500;
 
-  const satColors: Record<string, string> = {
-    NOMINAL:     '#3a7fff',
-    AT_RISK:     '#ff8800',
-    MANEUVERING: '#ff4444',
-    RECOVERING:  '#00ff88',
+    // Scene
+    const scene = new THREE.Scene();
+    sceneRef.current = scene;
+
+    // Camera
+    const camera = new THREE.PerspectiveCamera(45, W / H, 0.1, 1000);
+    camera.position.set(0, 0, 2.8);
+    cameraRef.current = camera;
+
+    // Renderer
+    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+    renderer.setSize(W, H);
+    renderer.setPixelRatio(window.devicePixelRatio);
+    renderer.setClearColor(0x000000, 0);
+    el.appendChild(renderer.domElement);
+    rendererRef.current = renderer;
+
+    // Group to rotate everything together
+    const group = new THREE.Group();
+    scene.add(group);
+    groupRef.current = group;
+
+    // Earth sphere
+    const geo  = new THREE.SphereGeometry(1, 64, 64);
+    const loader = new THREE.TextureLoader();
+    const tex  = loader.load(imgFrame3);
+    const mat  = new THREE.MeshPhongMaterial({ map: tex, specular: new THREE.Color(0x222244), shininess: 15 });
+    const globe = new THREE.Mesh(geo, mat);
+    group.add(globe);
+    globeRef.current = globe;
+
+    // Atmosphere glow
+    const atmoGeo = new THREE.SphereGeometry(1.06, 64, 64);
+    const atmoMat = new THREE.MeshPhongMaterial({
+      color: new THREE.Color(0x3a7fff),
+      transparent: true, opacity: 0.08,
+      side: THREE.FrontSide,
+    });
+    group.add(new THREE.Mesh(atmoGeo, atmoMat));
+
+    // Lights
+    const ambient = new THREE.AmbientLight(0xffffff, 0.4);
+    scene.add(ambient);
+    const sun = new THREE.DirectionalLight(0xffffff, 1.2);
+    sun.position.set(5, 3, 5);
+    scene.add(sun);
+
+    // Resize observer
+    const obs = new ResizeObserver(() => {
+      const w = el.clientWidth, h = el.clientHeight;
+      camera.aspect = w / h;
+      camera.updateProjectionMatrix();
+      renderer.setSize(w, h);
+    });
+    obs.observe(el);
+
+    // Animate loop
+    const animate = () => {
+      rafRef.current = requestAnimationFrame(animate);
+      // Auto-spin when not dragging
+      if (autoSpinRef.current && !dragRef.current.dragging) {
+        rotRef.current.y += 0.0015;
+      }
+      // Apply inertia
+      if (!dragRef.current.dragging) {
+        dragRef.current.velX *= 0.92;
+        dragRef.current.velY *= 0.92;
+        rotRef.current.x += dragRef.current.velX;
+        rotRef.current.y += dragRef.current.velY;
+        rotRef.current.x = Math.max(-Math.PI/2.2, Math.min(Math.PI/2.2, rotRef.current.x));
+      }
+      group.rotation.x = rotRef.current.x;
+      group.rotation.y = rotRef.current.y;
+      renderer.render(scene, camera);
+    };
+    animate();
+    setReady(true);
+
+    return () => {
+      cancelAnimationFrame(rafRef.current);
+      obs.disconnect();
+      renderer.dispose();
+      if (el.contains(renderer.domElement)) el.removeChild(renderer.domElement);
+    };
+  }, [THREE]);
+
+  // Convert ECI to Three.js 3D position on sphere surface
+  const eciToThree = useCallback((r: number[], altitude = 0): [number, number, number] => {
+    const RE = 6378.137;
+    const rMag = Math.sqrt(r[0]**2+r[1]**2+r[2]**2);
+    const rn = r.map(x => x / rMag);
+    const rad = 1 + altitude / RE * 0.8; // scale altitude visually
+    return [rn[0]*rad, rn[2]*rad, -rn[1]*rad]; // ECI→Three axes swap
+  }, []);
+
+  // Update satellite meshes + orbits + debris
+  useEffect(() => {
+    if (!THREE || !groupRef.current || !ready) return;
+    const group = groupRef.current;
+    const loader = new THREE.TextureLoader();
+
+    // ── Satellites ──
+    satellites.forEach(sat => {
+      if (!sat.r || sat.r.length < 3) return;
+      const isSelected = sat.id === selectedId;
+      const isAtRisk = sat.status === 'AT_RISK' || sat.status === 'MANEUVERING';
+      const color = isAtRisk ? 0xff4444 : isSelected ? 0x3a7fff : 0x00ccff;
+      const orbitColor = isAtRisk ? 0xff6644 : isSelected ? 0x9747ff : 0x3a7fff;
+
+      // Satellite sprite (uses imgSatellite texture)
+      if (!satMeshesRef.current[sat.id]) {
+        const tex = loader.load(imgSatellite);
+        const mat = new THREE.SpriteMaterial({ map: tex, color, transparent: true, depthTest: false });
+        const sprite = new THREE.Sprite(mat);
+        sprite.userData.satId = sat.id;
+        group.add(sprite);
+        satMeshesRef.current[sat.id] = sprite;
+      }
+      const sprite = satMeshesRef.current[sat.id];
+      const [x, y, z] = eciToThree(sat.r, norm3(sat.r) - 6378.137);
+      sprite.position.set(x, y, z);
+      sprite.material.color.setHex(color);
+      const scale = isSelected ? 0.10 : 0.065;
+      sprite.scale.set(scale, scale, scale);
+
+      // Orbit line — only for selected, color-coded by status
+      if (isSelected) {
+        if (orbitLinesRef.current[sat.id]) group.remove(orbitLinesRef.current[sat.id]);
+        const rMag = norm3(sat.r);
+        const ru = [sat.r[0]/rMag, sat.r[1]/rMag, sat.r[2]/rMag];
+        const v = sat.v && sat.v.length>=3 ? sat.v : [0,1,0];
+        const h = [ru[1]*v[2]-ru[2]*v[1], ru[2]*v[0]-ru[0]*v[2], ru[0]*v[1]-ru[1]*v[0]];
+        const hMag = Math.sqrt(h[0]**2+h[1]**2+h[2]**2) || 1;
+        const hn = h.map((x: number)=>x/hMag);
+        const perp = [hn[1]*ru[2]-hn[2]*ru[1], hn[2]*ru[0]-hn[0]*ru[2], hn[0]*ru[1]-hn[1]*ru[0]];
+        const pts: any[] = [];
+        for (let i = 0; i <= 128; i++) {
+          const a = (i/128)*2*Math.PI;
+          const pr = [
+            rMag*(ru[0]*Math.cos(a)+perp[0]*Math.sin(a)),
+            rMag*(ru[1]*Math.cos(a)+perp[1]*Math.sin(a)),
+            rMag*(ru[2]*Math.cos(a)+perp[2]*Math.sin(a)),
+          ];
+          const [px,py,pz] = eciToThree(pr, rMag-6378.137);
+          pts.push(new THREE.Vector3(px,py,pz));
+        }
+        const orbitGeo = new THREE.BufferGeometry().setFromPoints(pts);
+        const orbitMat = new THREE.LineBasicMaterial({ color: orbitColor, transparent: true, opacity: 0.75 });
+        const line = new THREE.Line(orbitGeo, orbitMat);
+        group.add(line);
+        orbitLinesRef.current[sat.id] = line;
+      } else if (orbitLinesRef.current[sat.id]) {
+        group.remove(orbitLinesRef.current[sat.id]);
+        delete orbitLinesRef.current[sat.id];
+      }
+    });
+
+    // Remove stale satellite sprites
+    Object.keys(satMeshesRef.current).forEach(id => {
+      if (!satellites.find(s => s.id === id)) {
+        group.remove(satMeshesRef.current[id]);
+        delete satMeshesRef.current[id];
+      }
+    });
+
+    // ── Debris ──
+    debrisList.forEach(deb => {
+      if (!deb.r || deb.r.length < 3) return;
+      if (!debrisMeshesRef.current[deb.id]) {
+        const geo = new THREE.SphereGeometry(0.008, 6, 6);
+        const mat = new THREE.MeshBasicMaterial({ color: 0x888888 });
+        const mesh = new THREE.Mesh(geo, mat);
+        group.add(mesh);
+        debrisMeshesRef.current[deb.id] = mesh;
+      }
+      const mesh = debrisMeshesRef.current[deb.id];
+      const [x, y, z] = eciToThree(deb.r, norm3(deb.r) - 6378.137);
+      mesh.position.set(x, y, z);
+    });
+
+    // Remove stale debris meshes
+    Object.keys(debrisMeshesRef.current).forEach(id => {
+      if (!debrisList.find(d => d.id === id)) {
+        group.remove(debrisMeshesRef.current[id]);
+        delete debrisMeshesRef.current[id];
+      }
+    });
+
+  }, [THREE, satellites, debrisList, selectedId, ready, eciToThree]);
+
+  // Mouse handlers
+  const onMouseDown = (e: React.MouseEvent) => {
+    dragRef.current.dragging = true;
+    dragRef.current.lastX = e.clientX;
+    dragRef.current.lastY = e.clientY;
+    dragRef.current.velX = 0;
+    dragRef.current.velY = 0;
+    autoSpinRef.current = false;
+  };
+  const onMouseMove = (e: React.MouseEvent) => {
+    if (!dragRef.current.dragging) return;
+    const dx = e.clientX - dragRef.current.lastX;
+    const dy = e.clientY - dragRef.current.lastY;
+    dragRef.current.velY = dx * 0.008;
+    dragRef.current.velX = dy * 0.008;
+    rotRef.current.y += dx * 0.008;
+    rotRef.current.x += dy * 0.008;
+    rotRef.current.x = Math.max(-Math.PI/2.2, Math.min(Math.PI/2.2, rotRef.current.x));
+    dragRef.current.lastX = e.clientX;
+    dragRef.current.lastY = e.clientY;
+  };
+  const onMouseUp = () => {
+  dragRef.current.dragging = false;
+  autoSpinRef.current = true;
+};
+
+  // Click to select satellite
+  const onCanvasClick = (e: React.MouseEvent) => {
+    if (!THREE || !cameraRef.current || !groupRef.current) return;
+    const el = mountRef.current!;
+    const rect = el.getBoundingClientRect();
+    const mouse = new THREE.Vector2(
+      ((e.clientX - rect.left) / rect.width) * 2 - 1,
+      -((e.clientY - rect.top) / rect.height) * 2 + 1
+    );
+    const raycaster = new THREE.Raycaster();
+    raycaster.setFromCamera(mouse, cameraRef.current);
+    const meshes = [...Object.values(satMeshesRef.current)];
+    const hits = raycaster.intersectObjects(meshes);
+    if (hits.length > 0) {
+      const id = hits[0].object.userData.satId;
+      if (id) onSelect(id);
+    }
   };
 
   return (
-    <div ref={containerRef} style={{ position: 'absolute', inset: 0, borderRadius: 5 }}>
-      {/* Background */}
+    <div style={{ position: 'absolute', inset: 0, borderRadius: 5, overflow: 'hidden' }}>
+      {/* Starfield background */}
       <div className="absolute inset-0 overflow-hidden pointer-events-none rounded-[5px]">
         <img alt="" className="absolute h-[133.97%] left-[-1.15%] max-w-none top-[-33.97%] w-[139.11%]" src={imgFrame2} />
       </div>
-
-      <div className="overflow-clip relative rounded-[inherit] size-full">
-        {/* Rotating Globe — canvas-based horizontal scroll (true Y-axis Earth spin) */}
-        <GlobeCanvas cx={CX} cy={CY} radius={165} textureSrc={imgFrame3} />
-
-        {/* Orbit path — positioned relative to globe center */}
-        <motion.div className="absolute" style={{ left: CX - 155, top: CY - 161, width: 260, height: 218 }}
-          animate={{ opacity:[0.6,1,0.6], filter:['drop-shadow(0 0 4px rgba(151,71,255,0.5))','drop-shadow(0 0 8px rgba(151,71,255,0.8))','drop-shadow(0 0 4px rgba(151,71,255,0.5))'] }}
-          transition={{ duration:3, repeat:Infinity }}>
-          <svg className="block size-full" fill="none" viewBox="0 0 259.946 217.681">
-            <path d={svgPaths.p3420b500} stroke="#9747FF" strokeWidth="2" />
-          </svg>
-        </motion.div>
-
-        {/* All satellites as interactive dots */}
-        {satellites.map((sat, i) => {
-          const { px, py } = eciToGlobe(sat.r, CX, CY, GLOBE_R + 40);
-          const isSelected = sat.id === selectedId;
-          const color      = satColors[sat.status] || '#3a7fff';
-          const isAtRisk   = sat.status === 'AT_RISK' || sat.status === 'MANEUVERING';
-
-          return (
-            <Tooltip.Root key={sat.id}>
-              <Tooltip.Trigger asChild>
-                <motion.div
-                  className="absolute cursor-pointer"
-                  style={{ left: px - 14, top: py - 14, width: 28, height: 28, zIndex: isSelected ? 20 : 10 }}
-                  onClick={() => onSelect(sat.id)}
-                  animate={isAtRisk ? {
-                    filter: [`drop-shadow(0 0 6px ${color})`, `drop-shadow(0 0 14px ${color})`, `drop-shadow(0 0 6px ${color})`]
-                  } : {
-                    filter: [`drop-shadow(0 0 4px ${color})`, `drop-shadow(0 0 10px ${color})`, `drop-shadow(0 0 4px ${color})`]
-                  }}
-                  transition={{ duration: isSelected ? 1 : 2, repeat: Infinity, delay: i * 0.15 }}
-                  whileHover={{ scale: 1.4 }}
-                >
-                  <img alt={sat.id} className="size-full object-contain pointer-events-none"
-                    src={imgSatellite}
-                    style={{ filter: isSelected
-                      ? `brightness(1.5) drop-shadow(0 0 8px ${color})`
-                      : `brightness(0.8) hue-rotate(${i*30}deg)` }}
-                  />
-                  {/* Selected ring */}
-                  {isSelected && (
-                    <motion.div
-                      className="absolute rounded-full border-2"
-                      style={{ inset:-6, borderColor: color }}
-                      animate={{ scale:[1,1.2,1], opacity:[0.8,0.4,0.8] }}
-                      transition={{ duration:1.5, repeat:Infinity }}
-                    />
-                  )}
-                  {/* AT_RISK pulse */}
-                  {isAtRisk && (
-                    <motion.div
-                      className="absolute rounded-full"
-                      style={{ inset:-4, background: color, opacity:0.15 }}
-                      animate={{ scale:[1,1.8,1], opacity:[0.15,0,0.15] }}
-                      transition={{ duration:1.5, repeat:Infinity }}
-                    />
-                  )}
-                </motion.div>
-              </Tooltip.Trigger>
-              <Tooltip.Portal>
-                <Tooltip.Content
-                  className="bg-[#0b1124] border border-[#3a7fff] rounded-[6px] px-[12px] py-[8px] text-[12px] z-50"
-                  sideOffset={5}>
-                  <p className="text-white font-bold">{sat.id}</p>
-                  <p className="text-[#aaa]">Alt: {sat.altitude}</p>
-                  <p className="text-[#aaa]">Vel: {sat.velocity}</p>
-                  <p className="text-[#aaa]">Fuel: {sat.propellant}</p>
-                  <p style={{ color }} className="font-semibold">{sat.status}</p>
-                  <Tooltip.Arrow className="fill-[#3a7fff]" />
-                </Tooltip.Content>
-              </Tooltip.Portal>
-            </Tooltip.Root>
-          );
-        })}
-
-        {/* Live debris dots from backend */}
-        {debrisList.map((deb, i) => {
-          if (!deb.r || deb.r.length < 3) return null;
-          const { px, py } = eciToGlobe(deb.r, CX, CY, GLOBE_R + 30);
-          // Only show if within canvas bounds
-          if (px < 0 || px > 1310 || py < 0 || py > 616) return null;
-          return (
-            <Tooltip.Root key={deb.id}>
-              <Tooltip.Trigger asChild>
-                <motion.div className="absolute cursor-pointer"
-                  style={{ left: px-7, top: py-7, width:14, height:14 }}
-                  whileHover={{ scale:1.6 }}
-                  animate={{ opacity:[0.4,0.9,0.4] }}
-                  transition={{ duration:2+i*0.1, delay:(i%8)*0.2, repeat:Infinity }}>
-                  <svg className="size-full" viewBox="0 0 14 14" fill="none">
-                    <circle cx="7" cy="7" fill="#888" r="7" />
-                    <circle cx="7" cy="7" fill="#bbb" r="3" />
-                  </svg>
-                </motion.div>
-              </Tooltip.Trigger>
-              <Tooltip.Portal>
-                <Tooltip.Content className="bg-[#0b1124] border border-[#606060] rounded-[6px] px-[10px] py-[6px] text-[11px] z-50" sideOffset={4}>
-                  <p className="text-white font-semibold">{deb.id}</p>
-                  <p className="text-[#aaa]">Alt: {(norm3(deb.r)-6378.137).toFixed(0)} km</p>
-                  <Tooltip.Arrow className="fill-[#606060]" />
-                </Tooltip.Content>
-              </Tooltip.Portal>
-            </Tooltip.Root>
-          );
-        })}
-
-        {/* Legend */}
-        {[['#ff0000','High Risk'],['#f70','Medium Risk'],['#00a21e','Low Risk']].map(([color,label],i) => (
-          <div key={i} className="absolute flex gap-[8px] items-center left-[24px]"
-            style={{ bottom: `${70 + i*23}px` }}>
-            <div className="h-[2px] rounded w-[24px]" style={{ background:color }} />
-            <p className="text-white text-[12px] font-['SF_Compact_Rounded:Regular',sans-serif]">{label}</p>
+      {/* Three.js mount */}
+      <div ref={mountRef} style={{ position: 'absolute', inset: 0, cursor: dragRef.current.dragging ? 'grabbing' : 'grab' }}
+        onMouseDown={onMouseDown} onMouseMove={onMouseMove}
+        onMouseUp={onMouseUp} onMouseLeave={onMouseUp}
+        onClick={onCanvasClick} />
+      {/* Satellite name labels */}
+      {ready && satellites.map(sat => {
+        if (!sat.r || sat.r.length < 3 || !cameraRef.current || !rendererRef.current) return null;
+        const isSelected = sat.id === selectedId;
+        if (!isSelected) return null;
+        // Project 3D position to screen
+        if (!THREE) return null;
+        const [x,y,z] = eciToThree(sat.r, norm3(sat.r)-6378.137);
+        const vec = new THREE.Vector3(x,y,z);
+        const group = groupRef.current;
+        if (group) vec.applyEuler(group.rotation);
+        vec.project(cameraRef.current);
+        const el = rendererRef.current.domElement;
+        const sx = (vec.x+1)/2 * el.clientWidth;
+        const sy = (-vec.y+1)/2 * el.clientHeight;
+        if (vec.z > 1) return null; // behind globe
+        return (
+          <div key={sat.id} style={{
+            position: 'absolute', left: sx+12, top: sy-6,
+            color: '#3a7fff', fontSize: 10, fontFamily: 'Azeret Mono, monospace',
+            pointerEvents: 'none', whiteSpace: 'nowrap',
+            textShadow: '0 0 6px rgba(58,127,255,0.8)',
+          }}>
+            {sat.name}
           </div>
-        ))}
-
-        {/* Bottom legend */}
-        <div className="absolute flex gap-[24px] items-center left-[24px] bottom-[12px]">
-          <div className="flex items-center gap-[8px]">
-            <img src={imgSatellite} className="w-[20px] h-[20px]" alt="" />
-            <p className="text-white text-[14px]">Satellite</p>
-          </div>
-          <div className="flex items-center gap-[8px]">
-            <svg width="14" height="14" viewBox="0 0 14 14"><circle cx="7" cy="7" fill="#aaa" r="7"/></svg>
-            <p className="text-white text-[14px]">Debris</p>
-          </div>
-          <div className="flex items-center gap-[8px]">
-            <div className="w-[24px] h-[2px] bg-[#9747FF]" />
-            <p className="text-white text-[14px]">Orbit Path</p>
-          </div>
-        </div>
-      </div>
+        );
+      })}
       <div aria-hidden="true" className="absolute border border-[#1f3c5e] inset-0 pointer-events-none rounded-[5px]" />
     </div>
   );
@@ -717,11 +720,15 @@ function BullseyeRadarInline({ satellite, debrisList }: {
                 fontSize="13" fontFamily="Azeret Mono, monospace">
                 BT-{String(idx+1).padStart(3,'0')}
               </text>
+              <text x={rx+6} y={ry+8} fill={isClose ? '#ff4444' : '#8892a4'}
+  fontSize="12" fontFamily="Azeret Mono, monospace">
+  {dist < 1000 ? `${dist.toFixed(0)}km` : `${(dist/1000).toFixed(1)}Mm`}
+</text>
             </g>
           );
         })}
-        {[['1000km',CX+4,CY-R*0.25+5],['2500km',CX+4,CY-R*0.5+5],['5000km',CX+4,CY-R+5]].map(([l,x,y])=>(
-          <text key={l as string} x={x as number} y={y as number} fill="#2a3a55" fontSize="9" fontFamily="Azeret Mono, monospace">{l}</text>
+        {[['1000km',CX+4,CY-R*0.25+5],['2500km',CX+4,CY-R*0.5+5],['3750km',CX+4,CY-R*0.75+5],['5000km',CX+4,CY-R+5]].map(([l,x,y])=>(
+          <text key={l as string} x={x as number} y={y as number} fill="#8892a4" fontSize="9" fontFamily="Azeret Mono, monospace">{l}</text>
         ))}
         {/* Stats overlay — bottom LEFT of SVG canvas (fixed viewBox coords 0 0 420 410) */}
         {satellite && (
