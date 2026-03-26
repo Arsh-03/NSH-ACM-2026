@@ -43,7 +43,7 @@ orbital_registry: Dict[str, dict] = {}
 
 def check_threats_for_sat(sat_pos: np.ndarray) -> tuple:
     min_dist   = 9999.0
-    closest_id = None
+    closest = None
     for obj_id, data in orbital_registry.items():
         if data.get("type") != "DEBRIS":
             continue
@@ -52,10 +52,10 @@ def check_threats_for_sat(sat_pos: np.ndarray) -> tuple:
                 sat_pos - np.array(data["r"], dtype=float)))
             if math.isfinite(dist) and dist < min_dist:
                 min_dist   = dist
-                closest_id = obj_id
+                closest = obj_id
         except Exception:
             continue
-    return min_dist < WARNING_KM, round(min(min_dist, 9999.0), 3), closest_id
+    return min_dist < WARNING_KM, round(min(min_dist, 9999.0), 3), closest
 
 
 def scan_full_fleet():
@@ -145,38 +145,129 @@ async def ingest_telemetry(data: NSHTelemetry):
     rec["min_dist_km"]    = min_dist
     rec["closest_debris"] = closest
 
-    agent  = get_agent()
-    norm_s = sat_arr / np.array([7500,7500,7500,8,8,8])
-    with torch.no_grad():
-        dv_raw = agent.actor(
-            torch.FloatTensor(norm_s).unsqueeze(0)).squeeze(0).numpy()
-    dv_vec = np.clip(dv_raw, -1.0, 1.0) * MAX_THRUST
-    dv_mag = float(np.linalg.norm(dv_vec))
 
+    # ── Physics-based avoidance burn ─────────────────────────────────────
+    # Computes optimal dodge direction using relative velocity geometry.
+    # Burns perpendicular to debris approach vector — maximises miss distance.
+    if threat and closest is not None:
+        deb_data = orbital_registry.get(closest)
+        if deb_data:
+            deb_pos = np.array(deb_data["r"], dtype=float)
+            deb_vel = np.array(deb_data.get("v", [0,0,0]), dtype=float)
+            sat_pos = sat_arr[:3]
+            sat_vel = sat_arr[3:]
+
+            rel_pos  = deb_pos - sat_pos        # vector FROM sat TO debris
+            rel_vel  = deb_vel - sat_vel        # debris approach velocity
+            rel_dist = float(np.linalg.norm(rel_pos))
+
+            if rel_dist > 1e-6:
+                away_unit = -rel_pos / rel_dist  # points away from debris
+
+                # Is debris closing in?
+                closing_rate = float(np.dot(rel_vel, rel_pos / rel_dist))
+
+                if closing_rate < 0:
+                    # Debris approaching — burn out-of-plane for max miss distance
+                    orb_normal = np.cross(sat_pos, sat_vel)
+                    orb_mag    = float(np.linalg.norm(orb_normal))
+                    if orb_mag > 1e-6:
+                        orb_normal /= orb_mag
+                        rel_vel_mag = float(np.linalg.norm(rel_vel))
+                        if rel_vel_mag > 1e-6:
+                            rv_unit  = rel_vel / rel_vel_mag
+                            dodge    = np.cross(rv_unit, orb_normal)
+                            dodge_mg = float(np.linalg.norm(dodge))
+                            dodge_unit = dodge / dodge_mg if dodge_mg > 1e-6 else away_unit
+                        else:
+                            dodge_unit = away_unit
+                    else:
+                        dodge_unit = away_unit
+                else:
+                    # Debris moving away — burn radially outward
+                    radial     = sat_pos / (float(np.linalg.norm(sat_pos)) + 1e-12)
+                    dodge_unit = radial
+
+                dv_vec = np.array(dodge_unit * MAX_THRUST, dtype=float)
+                dv_mag = float(np.linalg.norm(dv_vec))
+            else:
+                # Direct hit — burn prograde immediately
+                prograde = sat_vel / (float(np.linalg.norm(sat_vel)) + 1e-12)
+                dv_vec   = np.array(prograde * MAX_THRUST, dtype=float)
+                dv_mag   = float(np.linalg.norm(dv_vec))
+        else:
+            dv_vec = np.zeros(3, dtype=float)
+            dv_mag = 0.0
+    else:
+        # No threat — PPO agent for nominal station-keeping
+        agent  = get_agent()
+        norm_s = sat_arr / np.array([7500,7500,7500,8,8,8])
+        with torch.no_grad():
+            dv_raw = agent.actor(
+                torch.FloatTensor(norm_s).unsqueeze(0)).squeeze(0).numpy()
+        dv_vec = np.clip(dv_raw, -1.0, 1.0) * MAX_THRUST
+        dv_mag = float(np.linalg.norm(dv_vec))
     time_since_burn = data.timestamp - rec["last_burn"]
-    can_burn = time_since_burn >= THERMAL_CD and rec["fuel_mass"] > 0
+    can_burn     = time_since_burn >= THERMAL_CD and rec["fuel_mass"] > 0
+    cooling_down = time_since_burn < THERMAL_CD
 
-    if threat and can_burn and dv_mag > 1e-4:
+    # Keep burning every cooldown cycle until threat is cleared
+    # Each burn uses fuel but debris keeps being re-evaluated each tick
+    if threat and can_burn and dv_mag > 1e-4 and rec["fuel_mass"] > 0:
+        # Burn approved — apply delta-v
         dm = (DRY_MASS + rec["fuel_mass"]) * (1 - np.exp(-dv_mag/(ISP*G0)))
         rec["fuel_mass"]  = max(0.0, rec["fuel_mass"] - dm)
         rec["last_burn"]  = data.timestamp
         rec["status"]     = "MANEUVERING"
         status = "MANEUVER_REQUIRED"
+        print(f"  🚀 BURN #{rec.get("burn_count",0)+1}: {data.sat_id} "
+              f"| dv={dv_mag:.5f}km/s | fuel_left={rec["fuel_mass"]:.2f}kg "
+              f"| debris_dist={min_dist:.3f}km")
+        rec["burn_count"] = rec.get("burn_count", 0) + 1
+
+    elif threat and cooling_down:
+        # In cooldown — preserve MANEUVERING, next burn fires when cooldown expires
+        dv_vec = np.zeros(3)
+        dv_mag = 0.0
+        rec["status"] = "MANEUVERING"
+        status = "NOMINAL"
+
+    elif not threat and rec["status"] == "MANEUVERING":
+        # Threat cleared after burn(s) — mark as recovering
+        dv_vec = np.zeros(3)
+        dv_mag = 0.0
+        rec["status"] = "RECOVERING"
+        rec["burn_count"] = 0
+        status = "NOMINAL"
+        print(f"  ✅ THREAT CLEARED: {data.sat_id} | "
+              f"dist={min_dist:.1f}km > {WARNING_KM}km")
+
     else:
         dv_vec = np.zeros(3)
         dv_mag = 0.0
-        rec["status"] = "AT_RISK" if threat else "NOMINAL"
+        # Preserve RECOVERING status for 5 ticks before going NOMINAL
+        if rec["status"] == "RECOVERING":
+            rec["recover_ticks"] = rec.get("recover_ticks", 0) + 1
+            if rec["recover_ticks"] > 5:
+                rec["status"] = "NOMINAL"
+                rec["recover_ticks"] = 0
+        elif threat:
+            rec["status"] = "AT_RISK"
+        else:
+            rec["status"] = "NOMINAL"
         status = "NOMINAL"
 
+    # Ensure all values are JSON-safe native Python types
+    dv_list = [float(x) for x in dv_vec] if hasattr(dv_vec, "__iter__") else [0.0, 0.0, 0.0]
     return {
-        "status":         status,
-        "sat_id":         sat_id,
-        "delta_v":        dv_vec.tolist(),
-        "dv_magnitude":   round(dv_mag, 6),
+        "status":         str(status),
+        "sat_id":         str(sat_id),
+        "delta_v":        dv_list,
+        "dv_magnitude":   round(float(dv_mag), 6),
         "fuel_remaining": round(float(rec["fuel_mass"]), 4),
         "eol_flag":       bool(rec["fuel_mass"] <= EOL_FUEL),
-        "min_dist_km":    min_dist,
-        "closest_debris": closest,
+        "min_dist_km":    round(float(min_dist), 3) if math.isfinite(min_dist) else 9999.0,
+        "closest_debris": str(closest) if closest else None,
         "accepted":       True,
     }
 
