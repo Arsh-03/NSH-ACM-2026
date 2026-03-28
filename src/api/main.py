@@ -3,18 +3,24 @@ FastAPI Backend — Project AETHER
 NSH-2026 | Autonomous Constellation Manager
 Port: 8000
 """
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
-from typing import List, Optional
+from typing import List, Optional, Set
 import numpy as np
 import torch
 import torch.nn as nn
 import os
+import json
+import asyncio
 
 # ── Match your actual project structure (src.ai not src.agent) ───────────────
 from src.ai.ppo_agent import PPOAgent
 from src.physics.integrator import rk4_step
 from src.ai.spatial_index import build_spatial_index, find_nearby_threats
+from src.api.telemetry import router as telemetry_router
+from src.api.maneuvers import router as maneuvers_router
+from src.api.simulation import router as simulation_router
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 RE             = 6378.137
@@ -60,6 +66,55 @@ def get_model() -> PPOAgent:
 # ── In-memory constellation state ─────────────────────────────────────────────
 _constellation: dict = {}
 _debris_cache:  list = []
+_ws_clients: Set[WebSocket] = set()  # Track active WebSocket connections
+
+
+# ── WebSocket Connection Manager ──────────────────────────────────────────────
+async def broadcast_state_update():
+    """Broadcast current constellation state to all connected WebSocket clients"""
+    if not _ws_clients:
+        return
+    
+    # Convert constellation to frontend-friendly format
+    satellites_list = []
+    for sat_id, rec in _constellation.items():
+        state = rec["state"]
+        satellites_list.append({
+            "id": sat_id,
+            "r": state[:3].tolist(),
+            "v": state[3:].tolist(),
+            "fuel": rec["fuel"],
+            "status": "NOMINAL" if rec["fuel"] > EOL_FUEL_KG else "EOL"
+        })
+    
+    debris_list = []
+    for i, deb_state in enumerate(_debris_cache):
+        debris_list.append({
+            "id": f"DEBRIS-{i}",
+            "r": deb_state[:3].tolist() if len(deb_state) >= 3 else [0, 0, 0],
+            "v": deb_state[3:].tolist() if len(deb_state) >= 6 else [0, 0, 0]
+        })
+    
+    message = {
+        "type": "state_update",
+        "satellites": satellites_list,
+        "debris": debris_list,
+        "sat_count": len(satellites_list),
+        "debris_count": len(debris_list),
+        "at_risk": sum(1 for s in satellites_list if s["status"] != "NOMINAL")
+    }
+    
+    # Send to all connected clients
+    disconnected = set()
+    for ws in _ws_clients:
+        try:
+            await ws.send_json(message)
+        except Exception as e:
+            print(f"[WS] Error broadcasting to client: {e}")
+            disconnected.add(ws)
+    
+    # Remove disconnected clients
+    _ws_clients.difference_update(disconnected)
 
 
 # ── Schemas ───────────────────────────────────────────────────────────────────
@@ -104,7 +159,7 @@ def health():
 
 
 @app.post("/api/telemetry")
-def ingest_telemetry(payload: TelemetryPayload):
+async def ingest_telemetry(payload: TelemetryPayload):
     global _debris_cache
     sat_arr = payload.state.to_array()
 
@@ -126,6 +181,9 @@ def ingest_telemetry(payload: TelemetryPayload):
 
     if payload.debris_states:
         _debris_cache = [d.to_array() for d in payload.debris_states]
+
+    # Broadcast updated state to all WebSocket clients
+    await broadcast_state_update()
 
     return {
         "status":   "accepted",
@@ -208,6 +266,18 @@ def get_status(sat_id: str):
     }
 
 
+@app.get("/api/telemetry/count")
+def get_telemetry_count():
+    """Get current constellation telemetry counts"""
+    at_risk = sum(1 for r in _constellation.values() 
+                 if r["fuel"] <= EOL_FUEL_KG or r["eol"])
+    return {
+        "satellites": len(_constellation),
+        "debris": len(_debris_cache),
+        "at_risk": at_risk
+    }
+
+
 @app.get("/api/constellation")
 def get_constellation():
     return {
@@ -218,3 +288,48 @@ def get_constellation():
             for sid, r in _constellation.items()
         ]
     }
+
+
+# ── WebSocket Endpoint ────────────────────────────────────────────────────────
+@app.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket):
+    """Live constellation state streaming via WebSocket"""
+    await websocket.accept()
+    _ws_clients.add(websocket)
+    print(f"[WS] Client connected. Total: {len(_ws_clients)}")
+    
+    try:
+        # Send initial state
+        await broadcast_state_update()
+        
+        # Listen for client messages
+        while True:
+            data = await websocket.receive_text()
+            try:
+                msg = json.loads(data)
+                if msg.get("type") == "get_state":
+                    # Client requested current state
+                    await broadcast_state_update()
+            except json.JSONDecodeError:
+                pass
+    except WebSocketDisconnect:
+        _ws_clients.discard(websocket)
+        print(f"[WS] Client disconnected. Total: {len(_ws_clients)}")
+    except Exception as e:
+        print(f"[WS] Error: {e}")
+        _ws_clients.discard(websocket)
+
+
+# ── CORS Middleware ───────────────────────────────────────────────────────────
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# ── Include Routers ───────────────────────────────────────────────────────────
+app.include_router(telemetry_router, prefix="/api", tags=["telemetry"])
+app.include_router(maneuvers_router, prefix="/api", tags=["maneuvers"])
+app.include_router(simulation_router, prefix="/api", tags=["simulation"])

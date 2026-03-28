@@ -4,8 +4,8 @@ from src.ai.controller import HybridController
 class ConjunctionAnalyzer:
     def __init__(self):
         self.controller = HybridController()
-        # Strategic Horizon: 2 hours (7200s)
-        self.lookahead_seconds = 7200 
+        # Strategic Horizon: 24 hours (86400s)
+        self.lookahead_seconds = 86400
         self.time_step = 300 # Check every 5 minutes
 
     def analyze_threats(self, satellite_id, sat_state, debris_registry):

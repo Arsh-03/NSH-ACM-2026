@@ -54,11 +54,25 @@ async def run_auto_pilot():
                         immediate_danger = len(nearby) > 0
 
                     # ── SKIP conjunction analysis in the hot path ────────────
-                    # ConjunctionAnalyzer does 2-hour lookahead which is CPU
-                    # intensive and blocks the event loop — moved to background
+                    # Use strategic lookahead to preempt blind conjunctions.
+                    # Run threat analysis in thread pool to avoid blocking event loop
                     is_critical_future = False
+                    try:
+                        debris_registry = {
+                            k: v for k, v in orbital_registry.items()
+                            if v.get("type") == "DEBRIS"
+                        }
+                        future_threats = await asyncio.to_thread(
+                            analyzer.analyze_threats,
+                            sat_id,
+                            sat_state,
+                            debris_registry,
+                        )
+                        is_critical_future = any(t.get("risk_level") == "CRITICAL" for t in future_threats)
+                    except Exception:
+                        is_critical_future = False
 
-                    if immediate_danger and is_connected:
+                    if (immediate_danger or is_critical_future) and is_connected:
                         dv_action = agent.act(sat_state)
                         req = ManeuverRequest(
                             satellite_id=sat_id,
@@ -74,7 +88,7 @@ async def run_auto_pilot():
 
                     # Station-keeping
                     if is_connected:
-                        nominal_slot = data.get("nominal_slot_r")
+                        nominal_slot = data.get("nominal_slot")
                         if nominal_slot:
                             try:
                                 recovery_req = calculate_recovery_burn(

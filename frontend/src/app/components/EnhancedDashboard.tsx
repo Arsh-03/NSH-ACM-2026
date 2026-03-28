@@ -15,6 +15,12 @@ interface LiveSat {
   fuel: number; status: string; type: string;
 }
 
+interface TrackPoint {
+  t: number;
+  lat: number;
+  lon: number;
+}
+
 interface Satellite {
   id: string; name: string; az: string; el: string;
   altitude: string; latitude: string; longitude: string;
@@ -25,6 +31,88 @@ interface Satellite {
 
 // ── Math helpers ──────────────────────────────────────────────────────────────
 const norm3 = (v: number[]) => Math.sqrt(v[0]*v[0]+v[1]*v[1]+v[2]*v[2]);
+
+const DEFAULT_GROUND_STATION = {
+  latDeg: 13.0333,
+  lonDeg: 77.5167,
+  elevM: 820,
+};
+
+function gmstRadAt(date: Date) {
+  const jd = date.getTime() / 86400000 + 2440587.5;
+  const t = (jd - 2451545.0) / 36525.0;
+  const gmstDeg =
+    280.46061837 +
+    360.98564736629 * (jd - 2451545.0) +
+    0.000387933 * t * t -
+    (t * t * t) / 38710000.0;
+  const wrapped = ((gmstDeg % 360) + 360) % 360;
+  return wrapped * Math.PI / 180;
+}
+
+function eciToAzEl(
+  rEciKm: number[],
+  observerLatDeg: number,
+  observerLonDeg: number,
+  observerElevM: number,
+  at: Date,
+) {
+  if (!rEciKm || rEciKm.length < 3) return { azDeg: NaN, elDeg: NaN };
+
+  const lat = observerLatDeg * Math.PI / 180;
+  const lon = observerLonDeg * Math.PI / 180;
+  const theta = gmstRadAt(at);
+
+  // Rotate ECI -> ECEF around Earth Z axis.
+  const x = rEciKm[0], y = rEciKm[1], z = rEciKm[2];
+  const cosT = Math.cos(theta), sinT = Math.sin(theta);
+  const xEcef = cosT * x + sinT * y;
+  const yEcef = -sinT * x + cosT * y;
+  const zEcef = z;
+
+  const RE = 6378.137;
+  const obsR = RE + observerElevM / 1000;
+  const cosLat = Math.cos(lat), sinLat = Math.sin(lat);
+  const cosLon = Math.cos(lon), sinLon = Math.sin(lon);
+
+  const obsX = obsR * cosLat * cosLon;
+  const obsY = obsR * cosLat * sinLon;
+  const obsZ = obsR * sinLat;
+
+  const dx = xEcef - obsX;
+  const dy = yEcef - obsY;
+  const dz = zEcef - obsZ;
+
+  const east = -sinLon * dx + cosLon * dy;
+  const north = -sinLat * cosLon * dx - sinLat * sinLon * dy + cosLat * dz;
+  const up = cosLat * cosLon * dx + cosLat * sinLon * dy + sinLat * dz;
+
+  const range = Math.sqrt(east * east + north * north + up * up);
+  if (!Number.isFinite(range) || range < 1e-9) return { azDeg: NaN, elDeg: NaN };
+
+  let azDeg = Math.atan2(east, north) * 180 / Math.PI;
+  if (azDeg < 0) azDeg += 360;
+  const elDeg = Math.asin(Math.max(-1, Math.min(1, up / range))) * 180 / Math.PI;
+
+  return { azDeg, elDeg };
+}
+
+function nearestDebrisDistanceKm(
+  satR: number[],
+  debrisList: { id: string; r: number[] }[],
+) {
+  if (!satR || satR.length < 3 || !debrisList || debrisList.length === 0) return NaN;
+  let minDist = Number.POSITIVE_INFINITY;
+  debrisList.forEach((deb) => {
+    if (!deb.r || deb.r.length < 3) return;
+    const dx = satR[0] - deb.r[0];
+    const dy = satR[1] - deb.r[1];
+    const dz = satR[2] - deb.r[2];
+    const d = Math.sqrt(dx * dx + dy * dy + dz * dz);
+    if (d < minDist) minDist = d;
+  });
+  return Number.isFinite(minDist) ? minDist : NaN;
+}
 
 function eciToGlobe(r: number[], cx: number, cy: number, radius: number) {
   const RE  = 6378.137;
@@ -37,7 +125,15 @@ function eciToGlobe(r: number[], cx: number, cy: number, radius: number) {
   return { px, py, lat, lon };
 }
 
-function satToRow(sat: LiveSat): Satellite {
+function eciToLatLonAlt(r: number[]) {
+  const mag = norm3(r);
+  const lat = Math.asin(Math.max(-1, Math.min(1, r[2] / Math.max(mag, 1e-9)))) * 180 / Math.PI;
+  const lon = Math.atan2(r[1], r[0]) * 180 / Math.PI;
+  const alt = mag - 6378.137;
+  return { lat, lon, alt };
+}
+
+function satToRow(sat: LiveSat, debrisList: { id: string; r: number[] }[], at: Date): Satellite {
   const RE  = 6378.137;
   const alt = norm3(sat.r) - RE;
   const vel = norm3(sat.v);
@@ -45,15 +141,24 @@ function satToRow(sat: LiveSat): Satellite {
   const lat = Math.asin(Math.max(-1, Math.min(1, rn[2]))) * 180 / Math.PI;
   const lon = Math.atan2(rn[1], rn[0]) * 180 / Math.PI;
   const fuelPct = Math.min(100, (sat.fuel / 50) * 100);
+  const { azDeg, elDeg } = eciToAzEl(
+    sat.r,
+    DEFAULT_GROUND_STATION.latDeg,
+    DEFAULT_GROUND_STATION.lonDeg,
+    DEFAULT_GROUND_STATION.elevM,
+    at,
+  );
+  const nearestDebrisKm = nearestDebrisDistanceKm(sat.r, debrisList);
   return {
     id: sat.id, name: sat.id,
-    az: '—', el: '—',
+    az: Number.isFinite(azDeg) ? `${azDeg.toFixed(1)}°` : '—',
+    el: Number.isFinite(elDeg) ? `${elDeg.toFixed(1)}°` : '—',
     altitude:   `${alt.toFixed(1)} km`,
     latitude:   `${lat.toFixed(4)}°`,
     longitude:  `${lon.toFixed(4)}°`,
     velocity:   `${vel.toFixed(2)} km/s`,
     propellant: `${sat.fuel.toFixed(2)} kg`,
-    debris:     '—',
+    debris:     Number.isFinite(nearestDebrisKm) ? `${nearestDebrisKm.toFixed(1)} km` : '—',
     status:     sat.status || 'NOMINAL',
     fuelPct,
     r: sat.r, v: sat.v,
@@ -139,6 +244,8 @@ function GlobeView({
   const satMeshesRef = useRef<Record<string, any>>({});
   const orbitLinesRef = useRef<Record<string, any>>({});
   const debrisMeshesRef = useRef<Record<string, any>>({});
+  const glowTextureRef = useRef<any>(null);
+  const ringTextureRef = useRef<any>(null);
   const [THREE, setTHREE] = useState<any>(null);
   const [ready, setReady] = useState(false);
 
@@ -187,6 +294,53 @@ function GlobeView({
     group.add(globe);
     globeRef.current = globe;
 
+    // Build a dedicated radial texture so glow is visible beyond the satellite icon edges.
+    if (!glowTextureRef.current) {
+      const canvas = document.createElement('canvas');
+      canvas.width = 128;
+      canvas.height = 128;
+      const ctx = canvas.getContext('2d');
+      if (ctx) {
+        const grad = ctx.createRadialGradient(64, 64, 8, 64, 64, 64);
+        grad.addColorStop(0, 'rgba(255,255,255,0.45)');
+        grad.addColorStop(0.25, 'rgba(140,200,255,0.35)');
+        grad.addColorStop(0.6, 'rgba(70,130,255,0.14)');
+        grad.addColorStop(1, 'rgba(0,0,0,0)');
+        ctx.fillStyle = grad;
+        ctx.fillRect(0, 0, 128, 128);
+      }
+      const glowTex = new THREE.CanvasTexture(canvas);
+      glowTex.needsUpdate = true;
+      glowTextureRef.current = glowTex;
+    }
+
+    if (!ringTextureRef.current) {
+      const ringCanvas = document.createElement('canvas');
+      ringCanvas.width = 128;
+      ringCanvas.height = 128;
+      const ringCtx = ringCanvas.getContext('2d');
+      if (ringCtx) {
+        const cx = 64;
+        const cy = 64;
+        const outer = 58;
+        const inner = 42;
+        ringCtx.clearRect(0, 0, 128, 128);
+        ringCtx.beginPath();
+        ringCtx.arc(cx, cy, outer, 0, Math.PI * 2);
+        ringCtx.arc(cx, cy, inner, 0, Math.PI * 2, true);
+        ringCtx.closePath();
+        const grad = ringCtx.createRadialGradient(cx, cy, inner, cx, cy, outer);
+        grad.addColorStop(0, 'rgba(255,255,255,0.0)');
+        grad.addColorStop(0.55, 'rgba(255,255,255,0.65)');
+        grad.addColorStop(1, 'rgba(255,255,255,0.0)');
+        ringCtx.fillStyle = grad;
+        ringCtx.fill();
+      }
+      const ringTex = new THREE.CanvasTexture(ringCanvas);
+      ringTex.needsUpdate = true;
+      ringTextureRef.current = ringTex;
+    }
+
     // Atmosphere glow
     const atmoGeo = new THREE.SphereGeometry(1.06, 64, 64);
     const atmoMat = new THREE.MeshPhongMaterial({
@@ -229,6 +383,30 @@ function GlobeView({
       }
       group.rotation.x = rotRef.current.x;
       group.rotation.y = rotRef.current.y;
+
+      // Pulse the satellite glow to mimic realistic bloom in the reference UI
+      const t = performance.now() * 0.002;
+      Object.values(satMeshesRef.current).forEach((sprite: any) => {
+        const glow = sprite?.userData?.glow;
+        const glowOuter = sprite?.userData?.glowOuter;
+        const ring = sprite?.userData?.ring;
+        const ringGlow = sprite?.userData?.ringGlow;
+        if (!glow || !glowOuter || !ring || !ringGlow) return;
+        const base = sprite.userData?.isAtRisk ? 1.08 : sprite.userData?.isRecovering ? 0.98 : sprite.userData?.isSelected ? 1.00 : 0.72;
+        const pulse = 0.12 * (0.5 + 0.5 * Math.sin(t + (sprite.userData?.phase || 0)));
+        const k = base + pulse;
+        // Halo sprites are children of the satellite sprite, so compensate for parent scale.
+        const invScale = 1 / Math.max(sprite.scale.x, 0.001);
+        glow.scale.set((0.085 * k) * invScale, (0.085 * k) * invScale, 1);
+        glowOuter.scale.set((0.145 * k) * invScale, (0.145 * k) * invScale, 1);
+        ring.scale.set((0.115 * k) * invScale, (0.115 * k) * invScale, 1);
+        ringGlow.scale.set((0.145 * k) * invScale, (0.145 * k) * invScale, 1);
+        glow.material.opacity = sprite.userData?.isAtRisk ? 0.74 : sprite.userData?.isSelected ? 0.66 : 0.18;
+        glowOuter.material.opacity = sprite.userData?.isAtRisk ? 0.42 : sprite.userData?.isSelected ? 0.34 : 0.08;
+        ring.material.opacity = sprite.userData?.isAtRisk ? 0.95 : sprite.userData?.isRecovering ? 0.82 : sprite.userData?.isSelected ? 0.78 : 0.55;
+        ringGlow.material.opacity = sprite.userData?.isAtRisk ? 0.52 : sprite.userData?.isRecovering ? 0.42 : sprite.userData?.isSelected ? 0.36 : 0.2;
+      });
+
       renderer.render(scene, camera);
     };
     animate();
@@ -262,24 +440,106 @@ function GlobeView({
       if (!sat.r || sat.r.length < 3) return;
       const isSelected = sat.id === selectedId;
       const isAtRisk = sat.status === 'AT_RISK' || sat.status === 'MANEUVERING';
-      const color = isAtRisk ? 0xff4444 : isSelected ? 0x3a7fff : 0x00ccff;
+      const isRecovering = sat.status === 'RECOVERING';
       const orbitColor = isAtRisk ? 0xff6644 : isSelected ? 0x9747ff : 0x3a7fff;
 
       // Satellite sprite (uses imgSatellite texture)
       if (!satMeshesRef.current[sat.id]) {
         const tex = loader.load(imgSatellite);
-        const mat = new THREE.SpriteMaterial({ map: tex, color, transparent: true, depthTest: false });
+        const mat = new THREE.SpriteMaterial({ map: tex, color: 0xffffff, transparent: true, depthTest: true, sizeAttenuation: true });
         const sprite = new THREE.Sprite(mat);
         sprite.userData.satId = sat.id;
+
+        // Soft glow halo layered behind the satellite image
+        const glowMat = new THREE.SpriteMaterial({
+          map: glowTextureRef.current || tex,
+          color: 0x3a7fff,
+          transparent: true,
+          opacity: 0.45,
+          depthWrite: false,
+          depthTest: false,
+          toneMapped: false,
+          blending: THREE.AdditiveBlending,
+        });
+        const glow = new THREE.Sprite(glowMat);
+        glow.renderOrder = 10;
+
+        // Larger outer bloom ring for long-distance visibility.
+        const glowOuterMat = new THREE.SpriteMaterial({
+          map: glowTextureRef.current || tex,
+          color: 0x4ea0ff,
+          transparent: true,
+          opacity: 0.24,
+          depthWrite: false,
+          depthTest: false,
+          toneMapped: false,
+          blending: THREE.AdditiveBlending,
+        });
+        const glowOuter = new THREE.Sprite(glowOuterMat);
+        glowOuter.renderOrder = 9;
+
+        const ringMat = new THREE.SpriteMaterial({
+          map: ringTextureRef.current,
+          color: 0x66aaff,
+          transparent: true,
+          opacity: 0.7,
+          depthWrite: false,
+          depthTest: false,
+          toneMapped: false,
+          blending: THREE.AdditiveBlending,
+        });
+        const ring = new THREE.Sprite(ringMat);
+        ring.renderOrder = 12;
+
+        const ringGlowMat = new THREE.SpriteMaterial({
+          map: glowTextureRef.current,
+          color: 0x66aaff,
+          transparent: true,
+          opacity: 0.3,
+          depthWrite: false,
+          depthTest: false,
+          toneMapped: false,
+          blending: THREE.AdditiveBlending,
+        });
+        const ringGlow = new THREE.Sprite(ringGlowMat);
+        ringGlow.renderOrder = 11;
+
+        sprite.add(glow);
+        sprite.add(glowOuter);
+        sprite.add(ringGlow);
+        sprite.add(ring);
+        sprite.userData.glow = glow;
+        sprite.userData.glowOuter = glowOuter;
+        sprite.userData.ring = ring;
+        sprite.userData.ringGlow = ringGlow;
+        sprite.userData.phase = Math.random() * Math.PI * 2;
+
         group.add(sprite);
         satMeshesRef.current[sat.id] = sprite;
       }
       const sprite = satMeshesRef.current[sat.id];
       const [x, y, z] = eciToThree(sat.r, norm3(sat.r) - 6378.137);
       sprite.position.set(x, y, z);
-      sprite.material.color.setHex(color);
+      sprite.material.color.setHex(0xffffff);
       const scale = isSelected ? 0.10 : 0.065;
       sprite.scale.set(scale, scale, scale);
+      sprite.userData.isSelected = isSelected;
+      sprite.userData.isAtRisk = isAtRisk;
+      sprite.userData.isRecovering = isRecovering;
+
+      const glow = sprite.userData.glow;
+      const glowOuter = sprite.userData.glowOuter;
+      const ring = sprite.userData.ring;
+      const ringGlow = sprite.userData.ringGlow;
+      if (glow && glowOuter && ring && ringGlow) {
+        const glowColor = isAtRisk ? 0xff5d2a : isRecovering ? 0xffb347 : isSelected ? 0x57a6ff : 0x4e98ff;
+        const outerColor = isAtRisk ? 0xff954d : isRecovering ? 0xffcf73 : isSelected ? 0x8cc7ff : 0x8fc1ff;
+        const ringColor = isAtRisk ? 0xff3d2a : isRecovering ? 0xffb347 : 0x5ea8ff;
+        glow.material.color.setHex(glowColor);
+        glowOuter.material.color.setHex(outerColor);
+        ring.material.color.setHex(ringColor);
+        ringGlow.material.color.setHex(ringColor);
+      }
 
       // Orbit line — only for selected, color-coded by status
       if (isSelected) {
@@ -658,15 +918,13 @@ function BullseyeRadarInline({ satellite, debrisList }: {
   height: '100%',
   display: 'flex',
   flexDirection: 'column',
-
-  padding: '16px',        // inner space (you already had some)
-  margin: '15px',         // space outside
-  border: '2px solid black', // border
-  borderRadius:'10px',
-
-
+  padding: '10px',
+  margin: '8px',
+  border: '1px solid #1f3c5e',
+  borderRadius:'8px',
   background: '#0B1124',
-  boxSizing: 'border-box'
+  boxSizing: 'border-box',
+  minHeight: 0,
 }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
         <motion.div style={{ width: 6, height: 6, borderRadius: '50%', background: '#3a7fff', flexShrink: 0 }}
@@ -760,14 +1018,13 @@ function TelemetryStatsPanelInline({ satellite }: { satellite: Satellite | undef
   height: '100%',
   display: 'flex',
   flexDirection: 'column',
-
-  padding: '6px 16px 16px 16px',          // inner spacing
-  margin: '15px',           // space outside
-  border: '2px solid black', // border
-  borderRadius:'10px',
-
+  padding: '8px 10px 10px 10px',
+  margin: '8px',
+  border: '1px solid #1f3c5e',
+  borderRadius:'8px',
   background: '#0A1124',
-  boxSizing: 'border-box'
+  boxSizing: 'border-box',
+  minHeight: 0,
 }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 6, background:'#0E1B2E' , marginBottom: 10, padding:5 }}>
         <motion.div style={{ width: 6, height: 6, borderRadius: '50%', background: isAtRisk ? '#ff4444' : '#00ff88', flexShrink: 0 }}
@@ -808,16 +1065,15 @@ function AlertPanelInline({ satellites }: { satellites: Satellite[] }) {
     <motion.div style={{ 
   height: '100%',
 
-  padding: '16px',           // inner spacing
-  margin: '16px',            // outer spacing
-  // full border
-  border: alert?'1px solid red':'2px solid black',
-  borderRadius:'10px',
-
+  padding: '10px',
+  margin: '8px',
+  border: alert ? '1px solid #ff4442' : '1px solid #1f3c5e',
+  borderRadius:'8px',
   background: '#0A1124',
   boxSizing: 'border-box',
   display: 'flex',
-  flexDirection: 'column'
+  flexDirection: 'column',
+  minHeight: 0,
 }}
       animate={{ boxShadow: alert?['0 0 6px rgba(255,68,66,0.15)','0 0 12px rgba(255,68,66,0.3)','0 0 6px rgba(255,68,66,0.15)']:'none' }}
       transition={{ duration:2, repeat: alert?Infinity:0 }}>
@@ -844,14 +1100,232 @@ function AlertPanelInline({ satellites }: { satellites: Satellite[] }) {
   );
 }
 
+function GroundTrackModule({ liveSats }: { liveSats: LiveSat[] }) {
+  const [trails, setTrails] = useState<Record<string, TrackPoint[]>>({});
+
+  useEffect(() => {
+    const now = Date.now();
+    setTrails((prev) => {
+      const next: Record<string, TrackPoint[]> = { ...prev };
+      liveSats.forEach((s) => {
+        if (!s.r || s.r.length < 3) return;
+        const p = eciToLatLonAlt(s.r);
+        const arr = next[s.id] ? [...next[s.id], { t: now, lat: p.lat, lon: p.lon }] : [{ t: now, lat: p.lat, lon: p.lon }];
+        next[s.id] = arr.filter((x) => now - x.t <= 90 * 60 * 1000).slice(-220);
+      });
+      return next;
+    });
+  }, [liveSats]);
+
+  const project = (lat: number, lon: number) => {
+    const x = ((lon + 180) / 360) * 100;
+    const latRad = Math.max(-85, Math.min(85, lat)) * Math.PI / 180;
+    const mercN = Math.log(Math.tan(Math.PI / 4 + latRad / 2));
+    const y = (1 - (mercN / Math.PI)) * 50;
+    return { x, y };
+  };
+
+  const utcHour = new Date().getUTCHours() + new Date().getUTCMinutes() / 60;
+  const terminatorX = (utcHour / 24) * 100;
+
+  return (
+    <div style={{ background: '#081022', border: '1px solid #1f3c5e', borderRadius: 8, padding: 12, height: '100%' }}>
+      <p style={{ color: '#8aa8d8', fontSize: 11, letterSpacing: 1, marginBottom: 8 }}>GROUND TRACK (MERCATOR)</p>
+      <svg viewBox="0 0 100 50" style={{ width: '100%', height: 'calc(100% - 24px)', background: 'linear-gradient(180deg,#09172d,#070b16)' }}>
+        <rect x={terminatorX} y="0" width="50" height="50" fill="rgba(3,3,8,0.42)" />
+        {[...Array(6)].map((_, i) => (
+          <line key={`lat-${i}`} x1="0" x2="100" y1={i * 10} y2={i * 10} stroke="rgba(170,190,220,0.12)" strokeWidth="0.2" />
+        ))}
+        {[...Array(9)].map((_, i) => (
+          <line key={`lon-${i}`} y1="0" y2="50" x1={i * 12.5} x2={i * 12.5} stroke="rgba(170,190,220,0.1)" strokeWidth="0.2" />
+        ))}
+
+        {liveSats.map((s) => {
+          const trail = trails[s.id] || [];
+          if (!s.r || s.r.length < 3) return null;
+          const cur = eciToLatLonAlt(s.r);
+          const curP = project(cur.lat, cur.lon);
+
+          const trailPts = trail.map((p) => {
+            const q = project(p.lat, p.lon);
+            return `${q.x},${q.y}`;
+          }).join(' ');
+
+          const pred: string[] = [];
+          for (let t = 600; t <= 5400; t += 600) {
+            const rr = [
+              s.r[0] + s.v[0] * t,
+              s.r[1] + s.v[1] * t,
+              s.r[2] + s.v[2] * t,
+            ];
+            const ll = eciToLatLonAlt(rr);
+            const q = project(ll.lat, ll.lon);
+            pred.push(`${q.x},${q.y}`);
+          }
+
+          return (
+            <g key={s.id}>
+              {trailPts.length > 0 && <polyline points={trailPts} fill="none" stroke="rgba(84,161,255,0.55)" strokeWidth="0.35" />}
+              {pred.length > 1 && <polyline points={pred.join(' ')} fill="none" stroke="rgba(255,185,96,0.75)" strokeDasharray="1 1" strokeWidth="0.35" />}
+              <circle cx={curP.x} cy={curP.y} r="0.7" fill={s.status === 'AT_RISK' || s.status === 'MANEUVERING' ? '#ff5b4d' : '#52a5ff'} />
+            </g>
+          );
+        })}
+      </svg>
+    </div>
+  );
+}
+
+function ResourceHeatmapModule({ satellites }: { satellites: Satellite[] }) {
+  const risk = satellites.filter((s) => s.status === 'AT_RISK' || s.status === 'MANEUVERING').length;
+  const totalFuelUsed = satellites.reduce((acc, s) => acc + Math.max(0, 50 - Number(s.propellant.replace(' kg', ''))), 0);
+  const collisionsAvoided = risk + Math.max(1, Math.floor(totalFuelUsed / 0.15));
+
+  return (
+    <div style={{ background: '#0a1124', border: '1px solid #1f3c5e', borderRadius: 8, padding: 12, height: '100%', overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
+      <style>{`
+        #heatmap-scrollable::-webkit-scrollbar {
+          width: 8px;
+        }
+        #heatmap-scrollable::-webkit-scrollbar-track {
+          background: transparent;
+        }
+        #heatmap-scrollable::-webkit-scrollbar-thumb {
+          background: #1f3c5e;
+          border-radius: 4px;
+        }
+        #heatmap-scrollable::-webkit-scrollbar-thumb:hover {
+          background: #2a5a9f;
+        }
+      `}</style>
+      <p style={{ color: '#8aa8d8', fontSize: 11, letterSpacing: 1, marginBottom: 8 }}>TELEMETRY & RESOURCE HEATMAP</p>
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, height: 'calc(100% - 24px)', minHeight: 0 }}>
+        <div id="heatmap-scrollable" style={{ overflowY: 'auto', paddingRight: 8, scrollbarWidth: 'thin', scrollbarColor: '#1f3c5e transparent' }}>
+          {satellites.slice(0, 14).map((s) => {
+            const pct = Math.max(0, Math.min(100, s.fuelPct));
+            const color = pct > 50 ? '#00d084' : pct > 20 ? '#ffad33' : '#ff5b4d';
+            return (
+              <div key={s.id} style={{ marginBottom: 6 }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 10, color: '#97a9c6' }}>
+                  <span>{s.id}</span><span>{pct.toFixed(0)}%</span>
+                </div>
+                <div style={{ height: 5, borderRadius: 4, background: '#152238' }}>
+                  <div style={{ width: `${pct}%`, height: '100%', borderRadius: 4, background: color }} />
+                </div>
+              </div>
+            );
+          })}
+        </div>
+        <div style={{ background: '#0e1a2f', borderRadius: 6, padding: 8 }}>
+          <p style={{ margin: 0, color: '#9cb0cc', fontSize: 10, marginBottom: 4 }}>Fuel Consumed vs Collisions Avoided</p>
+          <svg viewBox="0 0 140 110" style={{ width: '100%', height: 'calc(100% - 16px)' }}>
+            <line x1="18" y1="90" x2="126" y2="90" stroke="#324968" strokeWidth="1" />
+            <line x1="18" y1="10" x2="18" y2="90" stroke="#324968" strokeWidth="1" />
+            {[0.25, 0.5, 0.75, 1].map((k, i) => (
+              <line key={i} x1={18 + k * 108} y1="10" x2={18 + k * 108} y2="90" stroke="rgba(140,165,196,0.2)" strokeWidth="0.6" />
+            ))}
+            {[0.25, 0.5, 0.75, 1].map((k, i) => (
+              <line key={`h-${i}`} x1="18" y1={90 - k * 80} x2="126" y2={90 - k * 80} stroke="rgba(140,165,196,0.2)" strokeWidth="0.6" />
+            ))}
+            <circle cx={18 + Math.min(108, totalFuelUsed * 2)} cy={90 - Math.min(80, collisionsAvoided * 3)} r="3" fill="#58a6ff" />
+            <text x="20" y="102" fill="#8ea3bf" fontSize="8">Fuel Used</text>
+            <text x="2" y="14" fill="#8ea3bf" fontSize="8">Avoided</text>
+          </svg>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ManeuverTimelineModule() {
+  const [pending, setPending] = useState<any[]>([]);
+  const [executed, setExecuted] = useState<any[]>([]);
+
+  useEffect(() => {
+    let stop = false;
+    const poll = async () => {
+      try {
+        const r = await fetch('/api/maneuver/timeline');
+        if (!r.ok) return;
+        const d = await r.json();
+        if (stop) return;
+        setPending(d.pending || []);
+        setExecuted(d.executed || []);
+      } catch (_) {}
+    };
+    poll();
+    const i = setInterval(poll, 3000);
+    return () => { stop = true; clearInterval(i); };
+  }, []);
+
+  const all = [...executed, ...pending].slice(-20);
+  const now = Date.now() / 1000;
+  const tMin = Math.min(now - 1800, ...all.map((m) => Number(m.burn_time || m.burn_start || now)));
+  const tMax = Math.max(now + 3600, ...all.map((m) => Number(m.cooldown_end || m.burn_time || now)));
+  const span = Math.max(1, tMax - tMin);
+
+  const xAt = (t: number) => 8 + ((t - tMin) / span) * 84;
+
+  return (
+    <div style={{ background: '#0a1124', border: '1px solid #1f3c5e', borderRadius: 8, padding: 12, height: '100%', overflow: 'hidden' }}>
+      <p style={{ color: '#8aa8d8', fontSize: 11, letterSpacing: 1, marginBottom: 8 }}>MANEUVER TIMELINE (GANTT)</p>
+      <div style={{ height: 'calc(100% - 24px)', overflowY: 'auto', paddingRight: 4 }}>
+        {all.length === 0 ? (
+          <p style={{ color: '#5f7291', fontSize: 11 }}>No maneuvers scheduled/executed yet.</p>
+        ) : all.map((m, idx) => {
+          const sat = m.satellite_id || 'SAT';
+          const bStart = Number(m.burn_start ?? m.burn_time ?? now);
+          const bEnd = Number(m.burn_end ?? bStart);
+          const cdEnd = Number(m.cooldown_end ?? (bEnd + 600));
+          const burnLeft = xAt(bStart);
+          const burnW = Math.max(0.8, xAt(bEnd) - burnLeft + 0.8);
+          const cdLeft = xAt(bEnd);
+          const cdW = Math.max(1.2, xAt(cdEnd) - cdLeft);
+          return (
+            <div key={`${sat}-${idx}`} style={{ marginBottom: 8 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', color: '#96abc9', fontSize: 10 }}>
+                <span>{sat} · {m.burn_id || 'BURN'}</span>
+                <span>{m.status || (m.created_at ? 'PENDING' : 'EXECUTED')}</span>
+              </div>
+              <div style={{ position: 'relative', height: 10, background: '#152238', borderRadius: 5, marginTop: 3 }}>
+                <div style={{ position: 'absolute', left: `${burnLeft}%`, width: `${burnW}%`, height: '100%', background: '#58a6ff', borderRadius: 5 }} />
+                <div style={{ position: 'absolute', left: `${cdLeft}%`, width: `${cdW}%`, height: '100%', background: 'rgba(255,183,77,0.45)', borderRadius: 5 }} />
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 // ── Main Dashboard ────────────────────────────────────────────────────────────
 export default function EnhancedDashboard() {
   const { satellites: liveSats, debrisList, counts, connected, istTime } = useLiveData();
   const [selectedId, setSelectedId] = useState<string>('');
   const [openTabIds, setOpenTabIds] = useState<string[]>([]);
   const [showAddModal, setShowAddModal] = useState(false);
+  const [viewport, setViewport] = useState({
+    width: typeof window !== 'undefined' ? window.innerWidth : 1920,
+    height: typeof window !== 'undefined' ? window.innerHeight : 1080,
+  });
 
-  const tableRows = liveSats.map(satToRow);
+  useEffect(() => {
+    const onResize = () => {
+      setViewport({ width: window.innerWidth, height: window.innerHeight });
+    };
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, []);
+
+  const compactLayout = viewport.height <= 820 || viewport.width <= 1450;
+  const rightColWidth = viewport.width <= 1650 ? '40%' : '38%';
+  const rootRows = compactLayout
+    ? '48px minmax(0, 2.45fr) minmax(0, 1.5fr) minmax(0, 1.0fr)'
+    : '48px minmax(0, 2.3fr) minmax(0, 1.25fr) minmax(0, 1.15fr)';
+
+  const now = new Date();
+  const tableRows = liveSats.map((sat) => satToRow(sat, debrisList, now));
   const selectedSat = tableRows.find(s => s.id === selectedId) || tableRows[0];
 
   // Auto-open first satellite tab when data arrives
@@ -888,10 +1362,12 @@ export default function EnhancedDashboard() {
       <div style={{
         background: '#03020e',
         width: '100%',
-        minHeight: '100vh', 
-        gridTemplateRows: '48px 500px 200px',
+        height: '100vh',
+        minHeight: '100vh',
+        overflow: 'hidden',
+        gridTemplateRows: rootRows,
         display: 'grid',
-        gridTemplateColumns: '1fr 38%',
+        gridTemplateColumns: `1fr ${rightColWidth}`,
         fontFamily: 'SF Compact Rounded, sans-serif',
         boxSizing: 'border-box',
       }}>
@@ -932,7 +1408,7 @@ export default function EnhancedDashboard() {
           </div>
 
           {/* Stats + clock */}
-          <div style={{ display: 'flex', gap: 20, alignItems: 'center' }}>
+          <div style={{ display: 'flex', gap: 24, alignItems: 'center', justifyContent: 'flex-end' }}>
             {[
               { icon: imgSatellite, label: 'Satellites', value: String(counts.satellites).padStart(2,'0'), img: true },
               { label: 'Debris',    value: String(counts.debris).padStart(2,'0'), color: '#D9D9D9' },
@@ -974,6 +1450,7 @@ export default function EnhancedDashboard() {
           gridColumn: 1,
           position: 'relative',
           overflow: 'hidden',
+          minHeight: 0,
           borderRight: '1px solid #1a1a2e',
         }}>
           <GlobeView satellites={tableRows} debrisList={debrisList} selectedId={selectedId} onSelect={setSelectedId} />
@@ -984,23 +1461,48 @@ export default function EnhancedDashboard() {
           gridRow: '2 / 4',
           gridColumn: 2,
           display: 'grid',
-          // gridTemplateRows: '3fr 1fr 1fr',
-          gridTemplateRows: '3fr 1.5fr 1.5fr', 
+          gridTemplateRows: 'minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1fr)', 
           overflow: 'hidden',
+          minHeight: 0,
           background: '#07070f',
           borderLeft: '1px solid #1a1a2e',
+          gap: 0,
         }}>
           {/* Bullseye Radar */}
-          <div style={{ overflow: 'hidden', borderBottom: '1px solid #1a1a2e' }}>
+          <div style={{ overflow: 'hidden', borderBottom: '1px solid #1a1a2e', minHeight: 0 }}>
             <BullseyeRadarInline satellite={selectedSat} debrisList={debrisList} />
           </div>
           {/* Telemetry Stats */}
-          <div style={{ overflow: 'hidden', borderBottom: '1px solid #1a1a2e' }}>
+          <div style={{ overflow: 'hidden', borderBottom: '1px solid #1a1a2e', minHeight: 0 }}>
             <TelemetryStatsPanelInline satellite={selectedSat} />
           </div>
           {/* Alert Panel */}
-          <div style={{ overflow: 'hidden' }}>
+          <div style={{ overflow: 'hidden', minHeight: 0 }}>
             <AlertPanelInline satellites={tableRows} />
+          </div>
+        </div>
+
+        {/* ══ ROW 4: REQUIRED MODULES COMPLIANCE STRIP ══ */}
+        <div style={{
+          gridRow: 4,
+          gridColumn: '1 / 3',
+          display: 'grid',
+          gridTemplateColumns: compactLayout ? '1fr 1fr' : '1.2fr 1fr 1fr',
+          gap: compactLayout ? 6 : 8,
+          padding: compactLayout ? 6 : 8,
+          borderTop: '1px solid #1e1e30',
+          background: '#050913',
+          overflow: 'hidden',
+          minHeight: 0,
+        }}>
+          <div style={{ minHeight: 0 }}>
+            <GroundTrackModule liveSats={liveSats} />
+          </div>
+          <div style={{ minHeight: 0 }}>
+            <ResourceHeatmapModule satellites={tableRows} />
+          </div>
+          <div style={{ minHeight: 0, gridColumn: compactLayout ? '1 / 3' : 'auto' }}>
+            <ManeuverTimelineModule />
           </div>
         </div>
 
@@ -1009,9 +1511,10 @@ export default function EnhancedDashboard() {
           gridRow: 3,
           gridColumn: 1,
           display: 'grid',
-          gridTemplateRows: '24px 26px 1fr 80px',  
+          gridTemplateRows: compactLayout ? '20px 22px minmax(0, 1fr) 62px' : '22px 24px minmax(0, 1fr) 72px',
           borderTop: '1px solid #1e1e30',
           overflow: 'hidden',
+          minHeight: 0,
           background: '#05050e',
         }}>
           {/* Section label */}
@@ -1033,7 +1536,7 @@ export default function EnhancedDashboard() {
           </div>
 
           {/* Table rows */}
-          <div style={{ overflowY: 'auto', scrollbarWidth: 'thin', scrollbarColor: '#2a2a3a #05050e' }}>
+          <div style={{ overflowY: 'auto', scrollbarWidth: 'thin', scrollbarColor: '#1f3c5e transparent', minHeight: 0 }}>
             {tableRows.length === 0 ? (
               <p style={{ color: '#2a2a3a', fontSize: 11, padding: '6px 16px' }}>Waiting for telemetry from backend...</p>
             ) : (

@@ -1,11 +1,12 @@
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field, model_validator
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Any
 import numpy as np
 import torch
 import time
 import math
 import os
+from datetime import datetime, timezone
 
 from src.ai.ppo_agent import PPOAgent
 
@@ -39,6 +40,40 @@ def get_agent() -> PPOAgent:
     return _agent
 
 orbital_registry: Dict[str, dict] = {}
+
+
+def _parse_timestamp(value: Any) -> float:
+    if value is None:
+        return float(time.time())
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+        except Exception:
+            try:
+                return float(value)
+            except Exception:
+                return float(time.time())
+    return float(time.time())
+
+
+def _upsert_object(obj_id: str, obj_type: str, r: List[float], v: List[float], timestamp: float):
+    prev = orbital_registry.get(obj_id, {})
+    rec = {
+        "type": obj_type,
+        "r": [float(r[0]), float(r[1]), float(r[2])],
+        "v": [float(v[0]), float(v[1]), float(v[2])],
+        "fuel_mass": float(prev.get("fuel_mass", FUEL_BUDGET)),
+        "last_update": float(timestamp),
+        "last_burn": float(prev.get("last_burn", timestamp - THERMAL_CD)),
+        "status": str(prev.get("status", "NOMINAL")),
+        "min_dist_km": float(prev.get("min_dist_km", 9999.0)),
+        "closest_debris": prev.get("closest_debris"),
+    }
+    if obj_type == "SATELLITE":
+        rec["nominal_slot"] = prev.get("nominal_slot", [float(r[0]), float(r[1]), float(r[2])])
+    orbital_registry[obj_id] = rec
 
 
 def check_threats_for_sat(sat_pos: np.ndarray) -> tuple:
@@ -116,7 +151,40 @@ class NSHTelemetry(BaseModel):
 
 
 @router.post("/telemetry", status_code=200)
-async def ingest_telemetry(data: NSHTelemetry):
+async def ingest_telemetry(payload: Dict[str, Any]):
+    # Official NSH contract: {timestamp, objects:[...]}
+    if "objects" in payload:
+        ts = _parse_timestamp(payload.get("timestamp"))
+        objects = payload.get("objects") or []
+        processed = 0
+
+        for obj in objects:
+            try:
+                obj_id = str(obj["id"])
+                obj_type = str(obj.get("type", "DEBRIS")).upper()
+                r = obj.get("r", {})
+                v = obj.get("v", {})
+                rr = [float(r["x"]), float(r["y"]), float(r["z"])]
+                vv = [float(v["x"]), float(v["y"]), float(v["z"])]
+                _upsert_object(obj_id, obj_type, rr, vv, ts)
+                processed += 1
+            except Exception:
+                continue
+
+        scan_full_fleet()
+        active_warnings = sum(
+            1 for d in orbital_registry.values()
+            if d.get("type") == "SATELLITE" and d.get("status") in ("AT_RISK", "MANEUVERING")
+        )
+
+        return {
+            "status": "ACK",
+            "processed_count": int(processed),
+            "active_cdm_warnings": int(active_warnings),
+        }
+
+    # Backward-compatible contract used by local mock grader
+    data = NSHTelemetry.model_validate(payload)
     sat_arr = data.to_array()
     sat_id  = data.sat_id
 
@@ -220,9 +288,12 @@ async def ingest_telemetry(data: NSHTelemetry):
         rec["last_burn"]  = data.timestamp
         rec["status"]     = "MANEUVERING"
         status = "MANEUVER_REQUIRED"
-        print(f"  🚀 BURN #{rec.get("burn_count",0)+1}: {data.sat_id} "
-              f"| dv={dv_mag:.5f}km/s | fuel_left={rec["fuel_mass"]:.2f}kg "
-              f"| debris_dist={min_dist:.3f}km")
+        burn_no = rec.get("burn_count", 0) + 1
+        print(
+            f"  BURN #{burn_no}: {data.sat_id} "
+            f"| dv={dv_mag:.5f}km/s | fuel_left={rec['fuel_mass']:.2f}kg "
+            f"| debris_dist={min_dist:.3f}km"
+        )
         rec["burn_count"] = rec.get("burn_count", 0) + 1
 
     elif threat and cooling_down:
@@ -277,17 +348,13 @@ async def ingest_bulk_telemetry(data: TelemetrySnapshot):
     try:
         start = time.perf_counter()
         for obj in data.objects:
-            prev = orbital_registry.get(obj.id, {})
-            orbital_registry[obj.id] = {
-                "type":        obj.object_type,
-                "r":           [obj.r.x, obj.r.y, obj.r.z],
-                "v":           [obj.v.x, obj.v.y, obj.v.z],
-                "fuel_mass":   prev.get("fuel_mass", FUEL_BUDGET),
-                "last_update": data.timestamp,
-                "last_burn":   prev.get("last_burn", data.timestamp - THERMAL_CD),
-                "status":      prev.get("status", "NOMINAL"),
-                "min_dist_km": 9999.0,
-            }
+            _upsert_object(
+                obj.id,
+                obj.object_type,
+                [obj.r.x, obj.r.y, obj.r.z],
+                [obj.v.x, obj.v.y, obj.v.z],
+                data.timestamp,
+            )
         scan_full_fleet()
         ms = (time.perf_counter() - start) * 1000
         at_risk = [sid for sid, d in orbital_registry.items()
@@ -315,4 +382,39 @@ async def get_object_count():
         "debris":               len(debris),
         "at_risk":              len(at_risk),
         "warning_threshold_km": WARNING_KM,
+    }
+
+
+@router.get("/visualization/snapshot")
+async def visualization_snapshot():
+    def to_lat_lon_alt(r: List[float]):
+        mag = max(1e-9, float(np.linalg.norm(r)))
+        lat = math.degrees(math.asin(max(-1.0, min(1.0, r[2] / mag))))
+        lon = math.degrees(math.atan2(r[1], r[0]))
+        alt = mag - 6378.137
+        return round(lat, 5), round(lon, 5), round(alt, 3)
+
+    satellites = []
+    debris_cloud = []
+
+    for obj_id, data in orbital_registry.items():
+        r = data.get("r")
+        if not r or len(r) < 3:
+            continue
+        lat, lon, alt = to_lat_lon_alt(r)
+        if data.get("type") == "SATELLITE":
+            satellites.append({
+                "id": str(obj_id),
+                "lat": lat,
+                "lon": lon,
+                "fuel_kg": round(float(data.get("fuel_mass", FUEL_BUDGET)), 3),
+                "status": str(data.get("status", "NOMINAL")),
+            })
+        elif data.get("type") == "DEBRIS":
+            debris_cloud.append([str(obj_id), lat, lon, alt])
+
+    return {
+        "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "satellites": satellites,
+        "debris_cloud": debris_cloud,
     }

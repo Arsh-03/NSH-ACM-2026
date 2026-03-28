@@ -150,6 +150,21 @@ export function TelemetryLog({ selectedSatellite }: TelemetryLogProps = {}) {
 
   return (
     <div className="bg-[#05070d] border border-[#1f3c5e] rounded-[6px] p-[16px] h-full flex flex-col font-['JetBrains_Mono',monospace]">
+      <style>{`
+        #telemetry-log::-webkit-scrollbar {
+          width: 8px;
+        }
+        #telemetry-log::-webkit-scrollbar-track {
+          background: transparent;
+        }
+        #telemetry-log::-webkit-scrollbar-thumb {
+          background: #1f3c5e;
+          border-radius: 4px;
+        }
+        #telemetry-log::-webkit-scrollbar-thumb:hover {
+          background: #2a5a9f;
+        }
+      `}</style>
       {/* Header */}
       <div className="flex items-center justify-between mb-[12px] pb-[8px] border-b border-[#1f3c5e]">
         <div className="flex items-center gap-[8px]">
@@ -166,8 +181,9 @@ export function TelemetryLog({ selectedSatellite }: TelemetryLogProps = {}) {
       </div>
 
       {/* Log entries */}
-      <div ref={logRef}
-        className="flex-1 overflow-y-auto scrollbar-thin scrollbar-thumb-[#1f3c5e] scrollbar-track-transparent">
+      <div ref={logRef} id="telemetry-log"
+        className="flex-1 overflow-y-auto"
+        style={{ scrollbarWidth: 'thin', scrollbarColor: '#1f3c5e transparent' }}>
         <AnimatePresence initial={false}>
           {logs.map((log, index) => (
             <motion.div key={log.id}
