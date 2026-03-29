@@ -700,7 +700,7 @@ function BullseyeRadar({ satellite, debrisList }: {
   debrisList: {id:string; r:number[]}[];
 }) {
   return (
-    <div className="absolute bg-[#0b1124] h-[479px] left-[1390px] overflow-clip rounded-[6px] top-[94px] w-[592px]"
+    <div className="absolute bg-[#0b1124] h-[350px] left-[1390px] overflow-clip rounded-[6px] top-[94px] w-[592px]"
       style={{ boxShadow:'0 4px 20px rgba(0,0,0,0.3)' }}>
 
       {/* Header */}
@@ -933,7 +933,7 @@ function BullseyeRadarInline({ satellite, debrisList }: {
           BULLSEYE — {satellite?.name ?? 'NO TARGET'}
         </p>
       </div>
-      <svg viewBox="-60 0 480 410" style={{ width: '100%', flex: 1, minHeight: 0, display: 'block' }}>
+      <svg viewBox="-60 0 480 410" style={{ width: '100%', height: '100%', display: 'block' }}>
         {[R, R*0.75, R*0.5, R*0.25].map((r, i) => (
           <circle key={i} cx={CX} cy={CY} r={r} fill="none" stroke="#B3B3B3" strokeWidth="1" opacity={0.7} />
         ))}
@@ -1129,9 +1129,9 @@ function GroundTrackModule({ liveSats }: { liveSats: LiveSat[] }) {
   const terminatorX = (utcHour / 24) * 100;
 
   return (
-    <div style={{ background: '#081022', border: '1px solid #1f3c5e', borderRadius: 8, padding: 12, height: '100%' }}>
-      <p style={{ color: '#8aa8d8', fontSize: 11, letterSpacing: 1, marginBottom: 8 }}>GROUND TRACK (MERCATOR)</p>
-      <svg viewBox="0 0 100 50" style={{ width: '100%', height: 'calc(100% - 24px)', background: 'linear-gradient(180deg,#09172d,#070b16)' }}>
+    <div style={{ background: '#081022', border: '1px solid #1f3c5e', borderRadius: 8, padding: '6px 6px 4px 6px', height: '100%', display: 'flex', flexDirection: 'column' }}>
+      <p style={{ color: '#8aa8d8', fontSize: 11, letterSpacing: 1, marginBottom: 4, flexShrink: 0 }}>GROUND TRACK (MERCATOR)</p>
+      <svg viewBox="0 0 100 50" style={{ width: '100%', flex: 1, minHeight: 0, background: 'linear-gradient(180deg,#09172d,#070b16)' }}>
         <rect x={terminatorX} y="0" width="50" height="50" fill="rgba(3,3,8,0.42)" />
         {[...Array(6)].map((_, i) => (
           <line key={`lat-${i}`} x1="0" x2="100" y1={i * 10} y2={i * 10} stroke="rgba(170,190,220,0.12)" strokeWidth="0.2" />
@@ -1182,30 +1182,25 @@ function ResourceHeatmapModule({ satellites }: { satellites: Satellite[] }) {
   const collisionsAvoided = risk + Math.max(1, Math.floor(totalFuelUsed / 0.15));
 
   return (
-    <div style={{ background: '#0a1124', border: '1px solid #1f3c5e', borderRadius: 8, padding: 12, height: '100%', overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
+    <div style={{ background: '#0a1124', border: '1px solid #1f3c5e', borderRadius: 8, height: '100%', overflow: 'hidden', display: 'grid', gridTemplateColumns: '1fr 1fr', gridTemplateRows: '1fr' }}>
       <style>{`
-        #heatmap-scrollable::-webkit-scrollbar {
-          width: 8px;
-        }
-        #heatmap-scrollable::-webkit-scrollbar-track {
-          background: transparent;
-        }
-        #heatmap-scrollable::-webkit-scrollbar-thumb {
-          background: #1f3c5e;
-          border-radius: 4px;
-        }
-        #heatmap-scrollable::-webkit-scrollbar-thumb:hover {
-          background: #2a5a9f;
-        }
+        #heatmap-scrollable::-webkit-scrollbar { width: 8px; }
+        #heatmap-scrollable::-webkit-scrollbar-track { background: transparent; }
+        #heatmap-scrollable::-webkit-scrollbar-thumb { background: #1f3c5e; border-radius: 4px; }
+        #heatmap-scrollable::-webkit-scrollbar-thumb:hover { background: #2a5a9f; }
       `}</style>
-      <p style={{ color: '#8aa8d8', fontSize: 11, letterSpacing: 1, marginBottom: 8 }}>TELEMETRY & RESOURCE HEATMAP</p>
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, height: 'calc(100% - 24px)', minHeight: 0 }}>
-        <div id="heatmap-scrollable" style={{ overflowY: 'auto', paddingRight: 8, scrollbarWidth: 'thin', scrollbarColor: '#1f3c5e transparent' }}>
+
+      {/* Left: heading + scrollable fuel bars */}
+      <div style={{ gridColumn: 1, display: 'flex', flexDirection: 'column', borderRight: '1px solid #1a2a42', overflow: 'hidden' }}>
+        <div style={{ padding: '8px 12px', borderBottom: '1px solid #1a2a42', flexShrink: 0 }}>
+          <p style={{ color: '#8aa8d8', fontSize: 11, letterSpacing: 1, margin: 0 }}>TELEMETRY & RESOURCE HEATMAP</p>
+        </div>
+        <div id="heatmap-scrollable" style={{ overflowY: 'auto', padding: '8px 8px 8px 12px', flex: 1, scrollbarWidth: 'thin', scrollbarColor: '#1f3c5e transparent' }}>
           {satellites.slice(0, 14).map((s) => {
             const pct = Math.max(0, Math.min(100, s.fuelPct));
             const color = pct > 50 ? '#00d084' : pct > 20 ? '#ffad33' : '#ff5b4d';
             return (
-              <div key={s.id} style={{ marginBottom: 6 }}>
+              <div key={s.id} style={{ marginBottom: 7 }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 10, color: '#97a9c6' }}>
                   <span>{s.id}</span><span>{pct.toFixed(0)}%</span>
                 </div>
@@ -1216,22 +1211,26 @@ function ResourceHeatmapModule({ satellites }: { satellites: Satellite[] }) {
             );
           })}
         </div>
-        <div style={{ background: '#0e1a2f', borderRadius: 6, padding: 8 }}>
-          <p style={{ margin: 0, color: '#9cb0cc', fontSize: 10, marginBottom: 4 }}>Fuel Consumed vs Collisions Avoided</p>
-          <svg viewBox="0 0 140 110" style={{ width: '100%', height: 'calc(100% - 16px)' }}>
-            <line x1="18" y1="90" x2="126" y2="90" stroke="#324968" strokeWidth="1" />
-            <line x1="18" y1="10" x2="18" y2="90" stroke="#324968" strokeWidth="1" />
-            {[0.25, 0.5, 0.75, 1].map((k, i) => (
-              <line key={i} x1={18 + k * 108} y1="10" x2={18 + k * 108} y2="90" stroke="rgba(140,165,196,0.2)" strokeWidth="0.6" />
-            ))}
-            {[0.25, 0.5, 0.75, 1].map((k, i) => (
-              <line key={`h-${i}`} x1="18" y1={90 - k * 80} x2="126" y2={90 - k * 80} stroke="rgba(140,165,196,0.2)" strokeWidth="0.6" />
-            ))}
-            <circle cx={18 + Math.min(108, totalFuelUsed * 2)} cy={90 - Math.min(80, collisionsAvoided * 3)} r="3" fill="#58a6ff" />
-            <text x="20" y="102" fill="#8ea3bf" fontSize="8">Fuel Used</text>
-            <text x="2" y="14" fill="#8ea3bf" fontSize="8">Avoided</text>
-          </svg>
-        </div>
+      </div>
+
+      {/* Right: graph fills full height, no heading */}
+      <div style={{ gridColumn: 2, background: '#0e1a2f', padding: 2, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
+        <p style={{ margin: '0', color: '#9cb0cc', fontSize: 10, flexShrink: 0 }}>Fuel Consumed vs Collisions Avoided</p>
+        <svg viewBox="0 0 180 140" style={{ width: '100%', flex: 1, height: '100%' }}>
+           <g transform="scale(1.2)">
+          <line x1="18" y1="90" x2="126" y2="90" stroke="#324968" strokeWidth="1" />
+          <line x1="18" y1="10" x2="18" y2="90" stroke="#324968" strokeWidth="1" />
+          {[0.25, 0.5, 0.75, 1].map((k, i) => (
+            <line key={i} x1={18 + k * 108} y1="10" x2={18 + k * 108} y2="90" stroke="rgba(140,165,196,0.2)" strokeWidth="0.6" />
+          ))}
+          {[0.25, 0.5, 0.75, 1].map((k, i) => (
+            <line key={`h-${i}`} x1="18" y1={90 - k * 80} x2="126" y2={90 - k * 80} stroke="rgba(140,165,196,0.2)" strokeWidth="0.6" />
+          ))}
+          <circle cx={18 + Math.min(108, totalFuelUsed * 2)} cy={90 - Math.min(80, collisionsAvoided * 3)} r="3" fill="#58a6ff" />
+          <text x="20" y="102" fill="#8ea3bf" fontSize="8">Fuel Used</text>
+          <text x="2" y="14" fill="#8ea3bf" fontSize="8">Avoided</text>
+          </g>
+        </svg>
       </div>
     </div>
   );
@@ -1320,9 +1319,12 @@ export default function EnhancedDashboard() {
 
   const compactLayout = viewport.height <= 820 || viewport.width <= 1450;
   const rightColWidth = viewport.width <= 1650 ? '40%' : '38%';
+  // const rootRows = compactLayout
+  //   ? '48px minmax(0, 2.45fr) minmax(0, 0.75fr) minmax(0, 0.45fr) minmax(0, 1.9fr)'
+  //   : '48px minmax(0, 2.3fr) minmax(0, 0.7fr) minmax(0, 0.4fr) minmax(0, 2.0fr)';
   const rootRows = compactLayout
-    ? '48px minmax(0, 2.45fr) minmax(0, 1.5fr) minmax(0, 1.0fr)'
-    : '48px minmax(0, 2.3fr) minmax(0, 1.25fr) minmax(0, 1.15fr)';
+  ? '48px minmax(0, 2.6fr) minmax(0, 0.8fr) minmax(0, 0.5fr) minmax(0, 1.2fr)'
+  : '48px minmax(0, 2.5fr) minmax(0, 0.75fr) minmax(0, 0.45fr) minmax(0, 1.3fr)';
 
   const now = new Date();
   const tableRows = liveSats.map((sat) => satToRow(sat, debrisList, now));
@@ -1456,62 +1458,63 @@ export default function EnhancedDashboard() {
           <GlobeView satellites={tableRows} debrisList={debrisList} selectedId={selectedId} onSelect={setSelectedId} />
         </div>
 
-        {/* ══ RIGHT COLUMN: spans ROW 2 + ROW 3 ══ */}
+        {/* ══ RIGHT COLUMN: spans ROW 2 + ROW 3 + ROW 4 ══ */}
         <div style={{
-          gridRow: '2 / 4',
+          gridRow: '2 / 5',
           gridColumn: 2,
           display: 'grid',
-          gridTemplateRows: 'minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1fr)', 
+          gridTemplateRows: 'minmax(0, 2fr) minmax(0, 1fr)',
           overflow: 'hidden',
           minHeight: 0,
           background: '#07070f',
           borderLeft: '1px solid #1a1a2e',
           gap: 0,
         }}>
-          {/* Bullseye Radar */}
+          {/* Bullseye Radar — full width top */}
           <div style={{ overflow: 'hidden', borderBottom: '1px solid #1a1a2e', minHeight: 0 }}>
             <BullseyeRadarInline satellite={selectedSat} debrisList={debrisList} />
           </div>
-          {/* Telemetry Stats */}
-          <div style={{ overflow: 'hidden', borderBottom: '1px solid #1a1a2e', minHeight: 0 }}>
-            <TelemetryStatsPanelInline satellite={selectedSat} />
-          </div>
-          {/* Alert Panel */}
-          <div style={{ overflow: 'hidden', minHeight: 0 }}>
-            <AlertPanelInline satellites={tableRows} />
+          {/* Telemetry + Alerts side by side — bottom */}
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', minHeight: 0, overflow: 'hidden' }}>
+            <div style={{ overflow: 'hidden', borderRight: '1px solid #1a1a2e', minHeight: 0 }}>
+              <TelemetryStatsPanelInline satellite={selectedSat} />
+            </div>
+            <div style={{ overflow: 'hidden', minHeight: 0 }}>
+              <AlertPanelInline satellites={tableRows} />
+            </div>
           </div>
         </div>
 
-        {/* ══ ROW 4: REQUIRED MODULES COMPLIANCE STRIP ══ */}
+        {/* ══ ROW 5: REQUIRED MODULES COMPLIANCE STRIP ══ */}
         <div style={{
-          gridRow: 4,
+          gridRow: 5,
           gridColumn: '1 / 3',
           display: 'grid',
-          gridTemplateColumns: compactLayout ? '1fr 1fr' : '1.2fr 1fr 1fr',
-          gap: compactLayout ? 6 : 8,
-          padding: compactLayout ? 6 : 8,
+          gridTemplateColumns: '1fr 1fr 1fr',
+          gap: 8,
+          padding: 8,
           borderTop: '1px solid #1e1e30',
           background: '#050913',
           overflow: 'hidden',
           minHeight: 0,
         }}>
-          <div style={{ minHeight: 0 }}>
+          <div style={{ minHeight: 0, overflow: 'hidden' }}>
             <GroundTrackModule liveSats={liveSats} />
           </div>
-          <div style={{ minHeight: 0 }}>
+          <div style={{ minHeight: 0, overflow: 'hidden' }}>
             <ResourceHeatmapModule satellites={tableRows} />
           </div>
-          <div style={{ minHeight: 0, gridColumn: compactLayout ? '1 / 3' : 'auto' }}>
+          <div style={{ minHeight: 0, overflow: 'hidden' }}>
             <ManeuverTimelineModule />
           </div>
         </div>
 
-        {/* ══ ROW 3: SATELLITE TABLE + TELEMETRY LOG (left column only) ══ */}
+        {/* ══ ROW 3: SATELLITE TABLE (left column only) ══ */}
         <div style={{
           gridRow: 3,
           gridColumn: 1,
           display: 'grid',
-          gridTemplateRows: compactLayout ? '20px 22px minmax(0, 1fr) 62px' : '22px 24px minmax(0, 1fr) 72px',
+          gridTemplateRows: compactLayout ? '20px 22px minmax(0, 1fr)' : '22px 24px minmax(0, 1fr)',
           borderTop: '1px solid #1e1e30',
           overflow: 'hidden',
           minHeight: 0,
@@ -1566,11 +1569,18 @@ export default function EnhancedDashboard() {
               })
             )}
           </div>
+        </div>
 
-          {/* Telemetry log strip */}
-          <div style={{ borderTop: '1px solid #151522', overflow: 'visible' }}>
-            <TelemetryLog selectedSatellite={selectedSat} />
-          </div>
+        {/* ══ ROW 4: TELEMETRY LOG (left column only) ══ */}
+        <div style={{
+          gridRow: 4,
+          gridColumn: 1,
+          borderTop: '1px solid #151522',
+          overflow: 'hidden',
+          minHeight: 0,
+          background: '#05050e',
+        }}>
+          <TelemetryLog selectedSatellite={selectedSat} />
         </div>
 
       </div>
@@ -1603,3 +1613,4 @@ export default function EnhancedDashboard() {
     </Tooltip.Provider>
   );
 }
+<p style="color: rgb(138, 168, 216); font-size: 11px; letter-spacing: 1px; margin-bottom: 8px;">TELEMETRY & RESOURCE HEATMAP</p>
