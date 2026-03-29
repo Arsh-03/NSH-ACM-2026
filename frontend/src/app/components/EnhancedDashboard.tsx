@@ -3,6 +3,7 @@ import { motion, AnimatePresence } from 'motion/react';
 import * as Tooltip from '@radix-ui/react-tooltip';
 import { SatelliteTabs } from './SatelliteTabs';
 import { TelemetryLog } from './TelemetryLog';
+import { MapViewPanel } from './MapViewPanel';
 import imgFrame2 from "../../assets/9394663ed06f79040e5fccebf1cd472a901e3df0.png";
 import imgFrame3 from "../../assets/earth_globe.jpg";
 import imgSatellite from "../../assets/6292a4c2f7fce59afb681a45c010a7b66e40fa69.png";
@@ -223,7 +224,7 @@ function useLiveData() {
 }
 
 // ── Three.js Globe ───────────────────────────────────────────────────────────
-function GlobeView({
+export function GlobeView({
   satellites, debrisList, selectedId, onSelect
 }: {
   satellites: Satellite[];
@@ -1455,7 +1456,7 @@ export default function EnhancedDashboard() {
           minHeight: 0,
           borderRight: '1px solid #1a1a2e',
         }}>
-          <GlobeView satellites={tableRows} debrisList={debrisList} selectedId={selectedId} onSelect={setSelectedId} />
+          <MapViewPanel satellites={tableRows} debrisList={debrisList} selectedId={selectedId} onSelect={setSelectedId} />
         </div>
 
         {/* ══ RIGHT COLUMN: spans ROW 2 + ROW 3 + ROW 4 ══ */}
