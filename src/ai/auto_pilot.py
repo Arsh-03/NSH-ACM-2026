@@ -72,6 +72,31 @@ async def run_auto_pilot():
                     except Exception:
                         is_critical_future = False
 
+                    # Graveyard Orbit Maneuver (EOL Handling)
+                    if data.get("status") == "EOL" and is_connected:
+                        # Issuing a prograde burn to move to graveyard orbit (+300km raise target)
+                        # We calculate a one-time burn to shift its orbit.
+                        vel      = np.array(data["v"], dtype=float)
+                        v_unit   = vel / (np.linalg.norm(vel) + 1e-12)
+                        # Placeholder for Hohmann-like raise
+                        dv_vec = v_unit * 0.005 # 5 m/s prograde (scaled down for fuel safety)
+                        req = ManeuverRequest(
+                            satellite_id=sat_id,
+                            dv_x=float(dv_vec[0]),
+                            dv_y=float(dv_vec[1]),
+                            dv_z=float(dv_vec[2])
+                        )
+                        try:
+                            await execute_burn(req)
+                            print(f"  ⚰️  GRAVEYARD MANEUVER: {sat_id} | Raising orbit...")
+                            # Mark as 'GRAVEYARD' to avoid repeated burns next tick
+                            orbital_registry[sat_id]["status"] = "GRAVEYARD"
+                        except Exception as e:
+                            print(f"[AutoPilot] Graveyard burn failed for {sat_id}: {e}")
+                        continue
+                    elif data.get("status") == "EOL":
+                        print(f"  📡 EOL WAIT: {sat_id} | Waiting for GS contact (is_connected={is_connected})")
+
                     if (immediate_danger or is_critical_future) and is_connected:
                         dv_action = agent.act(sat_state)
                         req = ManeuverRequest(

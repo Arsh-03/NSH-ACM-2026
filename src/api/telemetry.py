@@ -9,6 +9,7 @@ import os
 from datetime import datetime, timezone
 
 from src.ai.ppo_agent import PPOAgent
+from src.api import database as db
 
 router = APIRouter()
 
@@ -40,6 +41,16 @@ def get_agent() -> PPOAgent:
     return _agent
 
 orbital_registry: Dict[str, dict] = {}
+
+def sync_registry_with_db():
+    db.init_db()
+    db_reg = db.load_registry_from_db()
+    if db_reg:
+        print(f"📦 Restoring {len(db_reg)} satellites from database.")
+        orbital_registry.update(db_reg)
+
+# Global initialization call (happens on first import)
+sync_registry_with_db()
 
 
 def _parse_timestamp(value: Any) -> float:
@@ -73,6 +84,8 @@ def _upsert_object(obj_id: str, obj_type: str, r: List[float], v: List[float], t
     }
     if obj_type == "SATELLITE":
         rec["nominal_slot"] = prev.get("nominal_slot", [float(r[0]), float(r[1]), float(r[2])])
+        # Persistence call
+        db.upsert_satellite(obj_id, rec)
     orbital_registry[obj_id] = rec
 
 
@@ -102,6 +115,8 @@ def scan_full_fleet():
                 np.array(data["r"], dtype=float))
             data["min_dist_km"]    = min_dist
             data["closest_debris"] = closest
+            if threat:
+                db.log_alert(oid, closest, time.time(), min_dist)
             data["status"] = "AT_RISK" if threat else data.get("status", "NOMINAL")
         except Exception:
             continue
@@ -201,12 +216,16 @@ async def ingest_telemetry(payload: Dict[str, Any]):
             "min_dist_km":   9999.0,
             "closest_debris":None,
         }
+        # Persistence call
+        db.upsert_satellite(sat_id, orbital_registry[sat_id])
     else:
         rec = orbital_registry[sat_id]
         rec["r"]           = sat_arr[:3].tolist()
         rec["v"]           = sat_arr[3:].tolist()
         rec["fuel_mass"]   = data.fuel_kg
         rec["last_update"] = data.timestamp
+        # Persistence call
+        db.upsert_satellite(sat_id, rec)
 
     rec = orbital_registry[sat_id]
     threat, min_dist, closest = check_threats_for_sat(sat_arr[:3])
@@ -324,6 +343,8 @@ async def ingest_telemetry(payload: Dict[str, Any]):
                 rec["recover_ticks"] = 0
         elif threat:
             rec["status"] = "AT_RISK"
+        elif rec["fuel_mass"] <= EOL_FUEL:
+            rec["status"] = "EOL"
         else:
             rec["status"] = "NOMINAL"
         status = "NOMINAL"
