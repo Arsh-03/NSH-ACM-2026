@@ -5,7 +5,7 @@ Port: 8000
 """
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, validator
 from typing import List, Optional, Set
 import numpy as np
 import torch
@@ -13,6 +13,7 @@ import torch.nn as nn
 import os
 import json
 import asyncio
+import time
 
 # ── Match your actual project structure (src.ai not src.agent) ───────────────
 from src.ai.ppo_agent import PPOAgent
@@ -125,8 +126,10 @@ class ECIState(BaseModel):
 
 class TelemetryPayload(BaseModel):
     sat_id:        str
-    timestamp:     float
-    state:         ECIState
+    timestamp:     Optional[float] = None
+    epoch:         Optional[float] = None
+    state:         Optional[ECIState] = None
+    state_vector:  Optional[List[float]] = None
     fuel_kg:       float = Field(FUEL_BUDGET, ge=0.0, le=FUEL_BUDGET)
     debris_states: List[ECIState] = []
 
@@ -161,22 +164,32 @@ def health():
 @app.post("/api/telemetry")
 async def ingest_telemetry(payload: TelemetryPayload):
     global _debris_cache
-    sat_arr = payload.state.to_array()
+    
+    # Handle timestamp/epoch conversion
+    ts = payload.timestamp if payload.timestamp is not None else (payload.epoch if payload.epoch is not None else time.time())
+    
+    # Handle state/state_vector conversion
+    if payload.state is not None:
+        sat_arr = payload.state.to_array()
+    elif payload.state_vector is not None and len(payload.state_vector) == 6:
+        sat_arr = np.array([float(x) for x in payload.state_vector], dtype=float)
+    else:
+        return {"error": "Provide either 'state' or 'state_vector'"}, 400
 
     if payload.sat_id not in _constellation:
         _constellation[payload.sat_id] = {
             "state":         sat_arr,
             "nominal_slot":  sat_arr[:3].copy(),
             "fuel":          payload.fuel_kg,
-            "last_burn_time": payload.timestamp - THERMAL_CD,
-            "time":          payload.timestamp,
+            "last_burn_time": ts - THERMAL_CD,
+            "time":          ts,
             "eol":           False,
         }
     else:
         rec = _constellation[payload.sat_id]
         rec["state"] = sat_arr
         rec["fuel"]  = payload.fuel_kg
-        rec["time"]  = payload.timestamp
+        rec["time"]  = ts
         rec["eol"]   = payload.fuel_kg <= EOL_FUEL_KG
 
     if payload.debris_states:

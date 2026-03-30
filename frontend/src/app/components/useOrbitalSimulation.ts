@@ -90,6 +90,10 @@ export interface SimSatellite {
   alt: number; // km above surface
   // History trail (updated every HISTORY_SAMPLE_INTERVAL_MS)
   history: TrailPoint[];
+  // Authoritative WS target blended in over a short window to avoid visible kinks.
+  wsTargetR?: number[];
+  wsTargetV?: number[];
+  wsBlendRemainingMs?: number;
 }
 
 /** Predicted future positions for the selected satellite */
@@ -104,12 +108,14 @@ const MU                        = 398600.4418; // Earth gravitational parameter 
 const RE                        = 6378.137;    // Earth radius km
 const TRAIL_WINDOW_MS           = 90 * 60 * 1000; // 90 minutes
 const HISTORY_SAMPLE_INTERVAL_MS = 5_000;       // push new trail point every 5s
+const MANEUVER_HISTORY_SAMPLE_INTERVAL_MS = 1_000; // denser trail while maneuvering
 const PREDICT_MINUTES           = 90;
 const PREDICT_DT_S              = 30;           // 30s steps → 180 future points
 const PREDICT_STEPS             = (PREDICT_MINUTES * 60) / PREDICT_DT_S;
 const PREDICT_REGEN_FRAMES      = 360;          // regenerate prediction every ~6s at 60fps
 // Max integration step to avoid numerical instability
 const MAX_DT_S                  = 0.1;          // clamp frame deltaTime to 100ms
+const WS_BLEND_DURATION_MS       = 300;          // smooth truth-anchor correction window
 
 // ── Math helpers ──────────────────────────────────────────────────────────────
 
@@ -117,44 +123,69 @@ const norm3 = (v: number[]) =>
   Math.sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
 
 /**
- * ECI → geographic lat/lon/alt.
- * No GMST correction (matches EnhancedDashboard's eciToLatLonAlt for visual consistency).
+ * ECI → geographic lat/lon/alt using GMST correction for Earth rotation.
  */
-function eciToGeo(r: number[]): { lat: number; lon: number; alt: number } {
+function eciToGeo(r: number[], gmstRad: number): { lat: number; lon: number; alt: number } {
   const mag = norm3(r);
   if (mag < 1e-9) return { lat: 0, lon: 0, alt: 0 };
+  
   const lat = Math.asin(Math.max(-1, Math.min(1, r[2] / mag))) * (180 / Math.PI);
-  const lon = Math.atan2(r[1], r[0]) * (180 / Math.PI);
+  
+  // Apply GMST rotation to longitude
+  let lon = (Math.atan2(r[1], r[0]) - gmstRad) * (180 / Math.PI);
+  
+  // Wrap to [-180, 180]
+  lon = ((lon + 180) % 360 + 360) % 360 - 180;
+  
   const alt = mag - RE;
   return { lat, lon, alt };
 }
 
-/**
- * Two-body Keplerian integrator — one Euler step.
- *
- * MATH:
- *   Gravitational acceleration:  a = −(μ / |r|³) · r
- *   Velocity update:             v(t+dt) = v(t) + a · dt
- *   Position update:             r(t+dt) = r(t) + v(t) · dt
- *
- * WHY EULER AND NOT RK4?
- *   For dt ≤ 100ms (max frame time), Euler integration gives position error
- *   of ~0.001 km per step. Over a 5s WS interval that accumulates to ~0.05 km —
- *   less than 0.001% of orbital radius. Visually indistinguishable.
- *   RK4 would cost 4× the computation for zero visible benefit.
- *
- * Returns new [r, v] after one step.
+/** Compute GMST in radians for a given Unix timestamp in milliseconds */
+function getGmstRad(ms: number) {
+  const jd = ms / 86400000 + 2440587.5;
+  const t = (jd - 2451545.0) / 36525.0;
+  const gmstDeg =
+    280.46061837 +
+    360.98564736629 * (jd - 2451545.0) +
+    0.000387933 * t * t -
+    (t * t * t) / 38710000.0;
+  return (((gmstDeg % 360) + 360) % 360 * Math.PI) / 180;
+}
+
+/** 
+ * Two-body Keplerian integrator + J2 Perturbation — one Euler step.
+ * 
+ * J2 reflects the Earth's non-spherical shape (equatorial bulge), 
+ * causing nodal regression and apsidal precession. Without this,
+ * frontend paths drift from the J2-aware backend.
  */
 function eulerStep(
   r: number[],
   v: number[],
   dt_s: number,
 ): { r: number[]; v: number[] } {
-  const mag  = norm3(r);
-  const mag3 = mag * mag * mag;
-  const ax   = (-MU / mag3) * r[0];
-  const ay   = (-MU / mag3) * r[1];
-  const az   = (-MU / mag3) * r[2];
+  const mag = Math.sqrt(r[0]**2 + r[1]**2 + r[2]**2);
+  const mag2 = mag * mag;
+  const mag3 = mag2 * mag;
+  const mag5 = mag3 * mag2;
+
+  // 1. Core Keplerian Acceleration
+  const k = -MU / mag3;
+  let ax = k * r[0];
+  let ay = k * r[1];
+  let az = k * r[2];
+
+  // 2. J2 Perturbation Acceleration
+  const z2 = r[2] * r[2];
+  const j2_k = (1.5 * 1.08263e-3 * MU * RE * RE) / mag5;
+  const xy_factor = j2_k * (5 * z2 / mag2 - 1);
+  const z_factor  = j2_k * (5 * z2 / mag2 - 3);
+
+  ax += r[0] * xy_factor;
+  ay += r[1] * xy_factor;
+  az += r[2] * z_factor;
+
   return {
     v: [v[0] + ax * dt_s, v[1] + ay * dt_s, v[2] + az * dt_s],
     r: [r[0] + v[0] * dt_s, r[1] + v[1] * dt_s, r[2] + v[2] * dt_s],
@@ -170,6 +201,7 @@ function propagateN(
   v0: number[],
   dt_s: number,
   steps: number,
+  ms: number,
 ): PredictPoint[] {
   const result: PredictPoint[] = [];
   let r = [...r0];
@@ -178,38 +210,38 @@ function propagateN(
     const next = eulerStep(r, v, dt_s);
     r = next.r;
     v = next.v;
-    const { lat, lon } = eciToGeo(r);
+    const ts = ms + (i + 1) * dt_s * 1000;
+    const gmst = getGmstRad(ts);
+    const { lat, lon } = eciToGeo(r, gmst);
     result.push({ lat, lon });
   }
   return result;
 }
 
 /**
- * Back-propagate to seed initial history.
- * Negates velocity to "run the orbit backwards" for 90 minutes,
- * then reverses the result so oldest point is first.
+ * Back-propagate to seed initial history using J2 awareness.
  */
-function seedHistory(r0: number[], v0: number[]): TrailPoint[] {
+function seedHistory(r0: number[], v0: number[], ms: number): TrailPoint[] {
   const dt_s  = PREDICT_DT_S;
-  const steps = (TRAIL_WINDOW_MS / 1000) / dt_s; // 180 steps
-  const vRev  = [v0[0], v0[1], v0[2]];
-  const vNeg  = [-vRev[0], -vRev[1], -vRev[2]];
+  const steps = (TRAIL_WINDOW_MS / 1000) / dt_s;
+  const vNeg  = [-v0[0], -v0[1], -v0[2]];
 
   const pts: TrailPoint[] = [];
   let r = [...r0];
   let v = [...vNeg];
 
   for (let i = 0; i < steps; i++) {
+    const ts = ms - (i + 1) * dt_s * 1000;
     const next = eulerStep(r, v, dt_s);
     r = next.r;
     v = next.v;
+    const gmst = getGmstRad(ts);
     pts.push({
-      ...eciToGeo(r),
-      timestamp: Date.now() - (i + 1) * dt_s * 1000,
+      ...eciToGeo(r, gmst),
+      timestamp: ts,
     });
   }
-
-  pts.reverse(); // oldest → newest
+  pts.reverse();
   return pts;
 }
 
@@ -267,9 +299,21 @@ export function useOrbitalSimulation({
   const frameCountRef    = useRef<number>(0);
   // Whether history has been seeded for each satellite
   const seededRef        = useRef<Set<string>>(new Set());
+  // Anchors the simulation to the latest authoritative backend clock
+  const simTimeRef       = useRef<number>(Date.now());
   // Current selected ID ref (avoids stale closure in RAF)
   const selectedIdRef    = useRef<string>(selectedId);
   selectedIdRef.current  = selectedId;
+
+  // Immediate prediction update function
+  const regeneratePrediction = useCallback(() => {
+    const sel = simRef.current.get(selectedIdRef.current);
+    if (sel?.r?.length === 3 && sel?.v?.length === 3) {
+      const pts = propagateN(sel.r, sel.v, PREDICT_DT_S, PREDICT_STEPS, simTimeRef.current);
+      const current: PredictPoint = { lat: sel.lat, lon: sel.lon };
+      setPrediction([current, ...pts]);
+    }
+  }, [selectedId]);
 
   // ── Absorb new WebSocket data into simulation state ────────────────────────
   //
@@ -278,26 +322,35 @@ export function useOrbitalSimulation({
   // the snap distance is tiny and visually imperceptible.
   useEffect(() => {
     const sim = simRef.current;
-    const now = Date.now();
+    
+    // Use latest message timestamp or fallback
+    const wallClock = Date.now();
+    simTimeRef.current = wallClock;
 
     liveSats.forEach((ls) => {
       if (!ls.r?.length || !ls.v?.length) return;
 
       const existing = sim.get(ls.id);
       if (existing) {
-        // Snap to authoritative position from WS
-        existing.r      = [...ls.r];
-        existing.v      = [...ls.v];
+        const statusChanged = existing.status !== ls.status;
+        // Blend toward authoritative state to avoid visible trajectory kinks.
+        existing.wsTargetR = [...ls.r];
+        existing.wsTargetV = [...ls.v];
+        existing.wsBlendRemainingMs = WS_BLEND_DURATION_MS;
         existing.status = ls.status;
         existing.fuel   = ls.fuel;
-        // Recompute geo from new authoritative position
-        const geo = eciToGeo(existing.r);
+
+        // Trigger immediate path update if maneuver starts/ends
+        if (statusChanged && ls.id === selectedIdRef.current) {
+          regeneratePrediction();
+        }
+
+        const geo = eciToGeo(existing.r, getGmstRad(simTimeRef.current));
         existing.lat = geo.lat;
         existing.lon = geo.lon;
         existing.alt = geo.alt;
       } else {
-        // New satellite — create entry and seed its history
-        const geo = eciToGeo(ls.r);
+        const geo = eciToGeo(ls.r, getGmstRad(simTimeRef.current));
         const newSat: SimSatellite = {
           id:      ls.id,
           status:  ls.status,
@@ -309,24 +362,24 @@ export function useOrbitalSimulation({
           lon:     geo.lon,
           alt:     geo.alt,
           history: [],
+          wsTargetR: undefined,
+          wsTargetV: undefined,
+          wsBlendRemainingMs: 0,
         };
 
-        // Seed history immediately so trail is full on first render
         if (!seededRef.current.has(ls.id) && ls.r.length === 3 && ls.v.length === 3) {
-          newSat.history = seedHistory(ls.r, ls.v);
+          newSat.history = seedHistory(ls.r, ls.v, simTimeRef.current);
           seededRef.current.add(ls.id);
         }
-
         sim.set(ls.id, newSat);
       }
     });
 
-    // Remove satellites that are no longer in the live feed
     const liveIds = new Set(liveSats.map((s) => s.id));
     for (const id of sim.keys()) {
       if (!liveIds.has(id)) sim.delete(id);
     }
-  }, [liveSats]);
+  }, [liveSats, selectedId, regeneratePrediction]);
 
   // ── RAF animation loop ─────────────────────────────────────────────────────
   useEffect(() => {
@@ -346,17 +399,39 @@ export function useOrbitalSimulation({
       lastTimeRef.current = now;
 
       const wallClock = Date.now();
+      const gmstRad   = getGmstRad(new Date(wallClock));
       const sim       = simRef.current;
 
       // ── Update every satellite position ───────────────────────────────────
       sim.forEach((sat) => {
+        // Apply a short blend toward authoritative WS state before propagation.
+        if (
+          sat.wsTargetR &&
+          sat.wsTargetV &&
+          (sat.wsBlendRemainingMs ?? 0) > 0
+        ) {
+          const remaining = Math.max(1, sat.wsBlendRemainingMs as number);
+          const alpha = Math.min(1, dt_ms / remaining);
+          sat.r = sat.r.map((cur, i) => cur + ((sat.wsTargetR as number[])[i] - cur) * alpha);
+          sat.v = sat.v.map((cur, i) => cur + ((sat.wsTargetV as number[])[i] - cur) * alpha);
+          sat.wsBlendRemainingMs = Math.max(0, remaining - dt_ms);
+
+          if ((sat.wsBlendRemainingMs ?? 0) <= 0) {
+            sat.r = [...sat.wsTargetR];
+            sat.v = [...sat.wsTargetV];
+            sat.wsTargetR = undefined;
+            sat.wsTargetV = undefined;
+            sat.wsBlendRemainingMs = 0;
+          }
+        }
+
         // One Euler integration step with clamped deltaTime
         const next = eulerStep(sat.r, sat.v, dt_s);
         sat.r = next.r;
         sat.v = next.v;
 
         // Update geographic position from new ECI state
-        const geo = eciToGeo(sat.r);
+        const geo = eciToGeo(sat.r, gmstRad);
         sat.lat = geo.lat;
         sat.lon = geo.lon;
         sat.alt = geo.alt;
@@ -366,8 +441,11 @@ export function useOrbitalSimulation({
         // We don't push a history point every frame (that would be 60 points/sec
         // = 324,000 points per satellite over 90 minutes). Instead we sample
         // every HISTORY_SAMPLE_INTERVAL_MS (5 seconds = 1080 max points).
+        const sampleInterval = sat.status === 'MANEUVERING'
+          ? MANEUVER_HISTORY_SAMPLE_INTERVAL_MS
+          : HISTORY_SAMPLE_INTERVAL_MS;
         const lastSample = lastSampleRef.current.get(sat.id) ?? 0;
-        if (wallClock - lastSample >= HISTORY_SAMPLE_INTERVAL_MS) {
+        if (wallClock - lastSample >= sampleInterval) {
           sat.history.push({ lat: sat.lat, lon: sat.lon, timestamp: wallClock });
           lastSampleRef.current.set(sat.id, wallClock);
 
@@ -392,7 +470,7 @@ export function useOrbitalSimulation({
       ) {
         const sel = sim.get(selectedIdRef.current);
         if (sel?.r?.length === 3 && sel?.v?.length === 3) {
-          const pts = propagateN(sel.r, sel.v, PREDICT_DT_S, PREDICT_STEPS);
+          const pts = propagateN(sel.r, sel.v, PREDICT_DT_S, PREDICT_STEPS, simTimeRef.current);
           // Include current position as first point so path starts at marker
           const current: PredictPoint = { lat: sel.lat, lon: sel.lon };
           setPrediction([current, ...pts]);
@@ -422,7 +500,7 @@ export function useOrbitalSimulation({
 
     const sel = simRef.current.get(selectedId);
     if (sel?.r?.length === 3 && sel?.v?.length === 3) {
-      const pts = propagateN(sel.r, sel.v, PREDICT_DT_S, PREDICT_STEPS);
+      const pts = propagateN(sel.r, sel.v, PREDICT_DT_S, PREDICT_STEPS, simTimeRef.current);
       setPrediction([{ lat: sel.lat, lon: sel.lon }, ...pts]);
     } else {
       setPrediction([]);

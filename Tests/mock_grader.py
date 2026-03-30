@@ -7,12 +7,13 @@ import json
 import time
 import math
 import random
+import numpy as np
 
 BASE_URL    = "http://localhost:8000/api"
 RE          = 6378.137
 UPDATE_RATE = 2.0
-NUM_SATS    = 10
-NUM_DEBRIS  = 20
+NUM_SATS    = 50
+NUM_DEBRIS  = 10000
 
 # ── Orbital helper ────────────────────────────────────────────────────────────
 def circular_orbit_state(alt_km, inc_deg, raan_deg, ta_deg):
@@ -38,12 +39,17 @@ SATELLITES = [
     {"id": "AETHER-03",   "alt": 570, "inc": 53,  "raan": 72,  "ta": 40},
     {"id": "AETHER-04",   "alt": 550, "inc": 53,  "raan": 108, "ta": 60},
     {"id": "AETHER-05",   "alt": 560, "inc": 53,  "raan": 144, "ta": 80},
-    {"id": "AETHER-06",   "alt": 580, "inc": 98,  "raan": 0,   "ta": 0},
-    {"id": "AETHER-07",   "alt": 590, "inc": 98,  "raan": 45,  "ta": 30},
-    {"id": "AETHER-08",   "alt": 600, "inc": 45,  "raan": 90,  "ta": 15},
-    {"id": "AETHER-09",   "alt": 610, "inc": 45,  "raan": 135, "ta": 45},
-    {"id": "AETHER-10",   "alt": 620, "inc": 28,  "raan": 180, "ta": 90},
 ]
+
+# Fill remaining satellites up to NUM_SATS
+for i in range(len(SATELLITES), NUM_SATS):
+    SATELLITES.append({
+        "id": f"AETHER-{i+1:02d}",
+        "alt": random.uniform(500, 600),
+        "inc": random.choice([53, 98, 45, 28]),
+        "raan": random.uniform(0, 360),
+        "ta": random.uniform(0, 360)
+    })
 
 def safe_post(url, payload, label=""):
     """POST with full error reporting — never crashes on bad response."""
@@ -53,53 +59,50 @@ def safe_post(url, payload, label=""):
             try:
                 return resp.json()
             except Exception:
-                print(f"  ⚠️  [{label}] Non-JSON response: {resp.text[:200]}")
+                print(f"  [WARN] [{label}] Non-JSON response: {resp.text[:200]}")
                 return None
         else:
-            print(f"  ❌ [{label}] HTTP {resp.status_code}: {resp.text[:300]}")
+            print(f"  [FAIL] [{label}] HTTP {resp.status_code}: {resp.text[:300]}")
             return None
     except requests.exceptions.ConnectionError:
-        print(f"  ❌ [{label}] Connection refused — is server running?")
+        print(f"  [FAIL] [{label}] Connection refused — is server running?")
         return None
     except Exception as e:
-        print(f"  ❌ [{label}] Error: {e}")
+        print(f"  [FAIL] [{label}] Error: {e}")
         return None
 
-def build_debris_field(sat_states):
-    debris = []
-
-    # Guaranteed close approach to SAT-01 (25km away)
-    # Counter-orbital velocity — debris passes through and moves away naturally
+def build_debris_field_numpy(sat_states):
+    # Fixed debris near targets
+    fixed_r = []
+    fixed_v = []
+    
     s1 = sat_states["SAT-01-ARSH"]
-    debris.append({
-        "id": "DEBRIS-000", "type": "DEBRIS",
-        "r": {"x": s1[0]+0.025, "y": s1[1],      "z": s1[2]},
-        "v": {"x": s1[3]*0.1,   "y": -s1[4]*1.02, "z": s1[5]*0.1},
-    })
-
-    # Guaranteed close approach to AETHER-05 (40km away)
+    fixed_r.append([s1[0]+0.025, s1[1], s1[2]])
+    fixed_v.append([s1[3]*0.1, -s1[4]*1.02, s1[5]*0.1])
+    
     s5 = sat_states["AETHER-05"]
-    debris.append({
-        "id": "DEBRIS-001", "type": "DEBRIS",
-        "r": {"x": s5[0],      "y": s5[1]+0.040,  "z": s5[2]},
-        "v": {"x": s5[3]*0.1,  "y": -s5[4]*1.02,  "z": s5[5]*0.1},
-    })
-
-    # Random debris
+    fixed_r.append([s5[0], s5[1]+0.040, s5[2]])
+    fixed_v.append([s5[3]*0.1, -s5[4]*1.02, s5[5]*0.1])
+    
+    # Random debris field
+    num_random = NUM_DEBRIS - len(fixed_r)
     random.seed(42)
-    for i in range(2, NUM_DEBRIS):
-        sv = circular_orbit_state(
-            random.uniform(450, 650),
-            random.uniform(0, 110),
-            random.uniform(0, 360),
-            random.uniform(0, 360),
-        )
-        debris.append({
-            "id": f"DEBRIS-{i:03d}", "type": "DEBRIS",
-            "r": {"x": sv[0], "y": sv[1], "z": sv[2]},
-            "v": {"x": sv[3], "y": sv[4], "z": sv[5]},
-        })
-    return debris
+    
+    rand_alts  = np.random.uniform(450, 650, num_random)
+    rand_incs  = np.random.uniform(0, 110, num_random)
+    rand_raans = np.random.uniform(0, 360, num_random)
+    rand_tas   = np.random.uniform(0, 360, num_random)
+    
+    rand_r = []
+    rand_v = []
+    for i in range(num_random):
+        sv = circular_orbit_state(rand_alts[i], rand_incs[i], rand_raans[i], rand_tas[i])
+        rand_r.append(sv[:3])
+        rand_v.append(sv[3:])
+        
+    all_r = np.array(fixed_r + rand_r)
+    all_v = np.array(fixed_v + rand_v)
+    return all_r, all_v
 
 
 def simulate_evaluator():
@@ -113,17 +116,17 @@ def simulate_evaluator():
     try:
         r = requests.get(f"{BASE_URL}/health", timeout=5)
         h = r.json()
-        print(f"✅ Backend online | system={h.get('system')} "
+        print(f"[OK] Backend online | system={h.get('system')} "
               f"| model_ready={h.get('model_ready')}")
     except Exception as e:
-        print(f"❌ Backend offline — start server: python main.py\n  ({e})")
+        print(f"[FAIL] Backend offline — start server: python main.py\n  ({e})")
         return
 
     # Fuel tracker — persists actual fuel across ticks
     fuel_tracker: dict = { sat["id"]: 50.0 for sat in SATELLITES }
 
     # Build satellite states
-    print("\n🛰️  Initialising constellation...")
+    print("\n[SAT] Initialising constellation...")
     sat_states = {}
     for sat in SATELLITES:
         sv = circular_orbit_state(sat["alt"], sat["inc"],
@@ -140,27 +143,38 @@ def simulate_evaluator():
             fuel_tracker[sat["id"]] = result["fuel_remaining"]
 
         if result:
-            print(f"  ✅ {sat['id']:<20} | status={result.get('status')} "
+            print(f"  [OK] {sat['id']:<20} | status={result.get('status')} "
                   f"| dist={result.get('min_dist_km','?')}km "
                   f"| dv={result.get('dv_magnitude',0):.5f} km/s")
         else:
-            print(f"  ❌ {sat['id']:<20} | FAILED — check server logs")
+            print(f"  [FAIL] {sat['id']:<20} | FAILED — check server logs")
 
     # Register debris
-    debris_list = build_debris_field(sat_states)
+    debris_r, debris_v = build_debris_field_numpy(sat_states)
+    debris_ids = [f"DEBRIS-{i:04d}" for i in range(NUM_DEBRIS)]
+    
+    def get_debris_payload(ids, r_arr, v_arr):
+        return [
+            {
+                "id": str(ids[i]), "type": "DEBRIS",
+                "r": {"x": float(r_arr[i][0]), "y": float(r_arr[i][1]), "z": float(r_arr[i][2])},
+                "v": {"x": float(v_arr[i][0]), "y": float(v_arr[i][1]), "z": float(v_arr[i][2])},
+            } for i in range(len(ids))
+        ]
+
     bulk_result = safe_post(f"{BASE_URL}/telemetry/bulk", {
         "timestamp": time.time(),
-        "objects":   debris_list,
+        "objects":   get_debris_payload(debris_ids, debris_r, debris_v),
     }, label="bulk-debris")
 
     if bulk_result:
         at_risk = bulk_result.get("at_risk_sats", [])
-        print(f"  ✅ {NUM_DEBRIS} debris registered | at_risk={at_risk}")
+        print(f"  [OK] {NUM_DEBRIS} debris registered | at_risk={at_risk}")
     else:
-        print(f"  ❌ Bulk debris registration failed")
+        print(f"  [FAIL] Bulk debris registration failed")
 
     # Live ticks
-    print(f"\n📡 Streaming every {UPDATE_RATE}s — Ctrl+C to stop\n")
+    print(f"\n[STREAM] Streaming every {UPDATE_RATE}s — Ctrl+C to stop\n")
     tick = 0
     total_burns = 0
 
@@ -171,23 +185,15 @@ def simulate_evaluator():
 
         # ── Send debris FIRST so threat detection works this tick ──────────
         MU_D = 398600.4418
-        for deb in debris_list:
-            r = [deb["r"]["x"], deb["r"]["y"], deb["r"]["z"]]
-            v = [deb["v"]["x"], deb["v"]["y"], deb["v"]["z"]]
-            rm = (r[0]**2+r[1]**2+r[2]**2)**0.5
-            ax = -MU_D/rm**3 * r[0]
-            ay = -MU_D/rm**3 * r[1]
-            az = -MU_D/rm**3 * r[2]
-            deb["r"]["x"] += v[0]*UPDATE_RATE + 0.5*ax*UPDATE_RATE**2
-            deb["r"]["y"] += v[1]*UPDATE_RATE + 0.5*ay*UPDATE_RATE**2
-            deb["r"]["z"] += v[2]*UPDATE_RATE + 0.5*az*UPDATE_RATE**2
-            deb["v"]["x"] += ax*UPDATE_RATE
-            deb["v"]["y"] += ay*UPDATE_RATE
-            deb["v"]["z"] += az*UPDATE_RATE
+        # Vectorized Numpy propagation
+        rm   = np.linalg.norm(debris_r, axis=1, keepdims=True)
+        acc  = (-MU_D / rm**3) * debris_r
+        debris_r += debris_v * UPDATE_RATE + 0.5 * acc * UPDATE_RATE**2
+        debris_v += acc * UPDATE_RATE
 
         safe_post(f"{BASE_URL}/telemetry/bulk", {
             "timestamp": now,
-            "objects":   debris_list,
+            "objects":   get_debris_payload(debris_ids, debris_r, debris_v),
         }, label="bulk-first")
 
         # ── Then send satellites — debris already in registry ────────────
@@ -237,11 +243,11 @@ def simulate_evaluator():
                     tick_burns  += 1
                     total_burns += 1
                     dv = result.get("delta_v", [0,0,0])
-                    print(f"  🚀 BURN  | {sat['id']:<20} "
+                    print(f"  [BURN] BURN  | {sat['id']:<20} "
                           f"| dist={mdist}km "
                           f"| dv=[{dv[0]:.4f},{dv[1]:.4f},{dv[2]:.4f}]")
                 elif mdist != "?" and mdist is not None and float(mdist) < 100:
-                    print(f"  ⚠️  CLOSE | {sat['id']:<20} "
+                    print(f"  [WARN] CLOSE | {sat['id']:<20} "
                           f"| dist={mdist}km")
 
         # Debris already sent above
@@ -250,11 +256,9 @@ def simulate_evaluator():
         all_nominal = tick_burns == 0 and tick > 10
         if all_nominal and tick % 30 == 0:
             # Pick 2 random satellites and place new debris near them
-            import random
             targets = random.sample(SATELLITES, min(2, len(SATELLITES)))
-            new_debris_id_base = len(debris_list)
-
-            for i, tgt in enumerate(targets):
+            
+            for tgt in targets:
                 sv_t = sat_states[tgt["id"]]
                 # Place debris 20-80km away on crossing trajectory
                 offset = random.uniform(0.02, 0.08)
@@ -266,27 +270,17 @@ def simulate_evaluator():
                 new_v  = [-sv_t[3]*random.uniform(0.98,1.02),
                           -sv_t[4]*random.uniform(0.98,1.02),
                            sv_t[5]*random.uniform(0.98,1.02)]
-                new_id = f"DEBRIS-N{new_debris_id_base+i:02d}"
-
-                # Replace an old debris or add new one
-                if new_debris_id_base + i < len(debris_list):
-                    debris_list[new_debris_id_base + i] = {
-                        "id": new_id, "type": "DEBRIS",
-                        "r": {"x":new_r[0],"y":new_r[1],"z":new_r[2]},
-                        "v": {"x":new_v[0],"y":new_v[1],"z":new_v[2]},
-                    }
-                else:
-                    debris_list.append({
-                        "id": new_id, "type": "DEBRIS",
-                        "r": {"x":new_r[0],"y":new_r[1],"z":new_r[2]},
-                        "v": {"x":new_v[0],"y":new_v[1],"z":new_v[2]},
-                    })
-                print(f"  🆕 NEW THREAT: {new_id} → {tgt['id']} "
+                
+                new_id = f"DEBRIS-N{len(debris_ids):02d}"
+                debris_ids.append(new_id)
+                debris_r = np.vstack([debris_r, new_r])
+                debris_v = np.vstack([debris_v, new_v])
+                
+                print(f"  [NEW] NEW THREAT: {new_id} → {tgt['id']} "
                       f"| offset={offset*1000:.0f}m")
 
         # ── Replace a random debris every 60 ticks for continuous action ──
         if tick % 60 == 0 and tick > 0:
-            import random
             tgt = random.choice(SATELLITES)
             sv_t = sat_states[tgt["id"]]
             offset = random.uniform(0.015, 0.05)
@@ -294,13 +288,12 @@ def simulate_evaluator():
             new_r  = [sv_t[0], sv_t[1], sv_t[2]]
             new_r[axis] += offset
             new_v  = [sv_t[3]*0.1, -sv_t[4]*1.02, sv_t[5]*0.1]
-            idx_replace = random.randint(2, len(debris_list)-1)
-            debris_list[idx_replace] = {
-                "id": f"DEBRIS-{idx_replace:03d}", "type": "DEBRIS",
-                "r": {"x":new_r[0],"y":new_r[1],"z":new_r[2]},
-                "v": {"x":new_v[0],"y":new_v[1],"z":new_v[2]},
-            }
-            print(f"  ♻️  DEBRIS RESET: DEBRIS-{idx_replace:03d} "
+            idx_replace = random.randint(2, len(debris_ids)-1)
+            
+            debris_r[idx_replace] = new_r
+            debris_v[idx_replace] = new_v
+            
+            print(f"  [RECYCLE] DEBRIS RESET: {debris_ids[idx_replace]} "
                   f"→ {tgt['id']} | dist={offset*1000:.0f}m")
 
         print(f"  Tick {tick:4d} | t={int(now)} | "

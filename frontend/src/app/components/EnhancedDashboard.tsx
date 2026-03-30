@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import * as Tooltip from '@radix-ui/react-tooltip';
 import { SatelliteTabs } from './SatelliteTabs';
@@ -128,20 +128,18 @@ function eciToGlobe(r: number[], cx: number, cy: number, radius: number) {
 }
 
 function eciToLatLonAlt(r: number[]) {
-  const mag = norm3(r);
-  const lat = Math.asin(Math.max(-1, Math.min(1, r[2] / Math.max(mag, 1e-9)))) * 180 / Math.PI;
-  const lon = Math.atan2(r[1], r[0]) * 180 / Math.PI;
+  const mag = Math.sqrt(r[0]**2 + r[1]**2 + r[2]**2);
+  const lat = Math.asin(r[2] / Math.max(1e-9, mag)) * 180 / Math.PI;
+  const gmst = gmstRadAt(new Date());
+  let lon = (Math.atan2(r[1], r[0]) - gmst) * 180 / Math.PI;
+  lon = ((lon + 180) % 360 + 360) % 360 - 180;
   const alt = mag - 6378.137;
   return { lat, lon, alt };
 }
 
 function satToRow(sat: LiveSat, debrisList: { id: string; r: number[] }[], at: Date): Satellite {
-  const RE  = 6378.137;
-  const alt = norm3(sat.r) - RE;
+  const { lat, lon, alt } = eciToLatLonAlt(sat.r);
   const vel = norm3(sat.v);
-  const rn  = sat.r.map(x => x / norm3(sat.r));
-  const lat = Math.asin(Math.max(-1, Math.min(1, rn[2]))) * 180 / Math.PI;
-  const lon = Math.atan2(rn[1], rn[0]) * 180 / Math.PI;
   const fuelPct = Math.min(100, (sat.fuel / 50) * 100);
   const { azDeg, elDeg } = eciToAzEl(
     sat.r,
@@ -195,10 +193,15 @@ function useLiveData() {
           const msg = JSON.parse(e.data);
           if (msg.type === 'state_update') {
             setSatellites(msg.satellites || []);
-            setDebrisList(msg.debris || []);
+            const compact = msg.debris_compact || [];
+            // Map [id, x, y, z] compact format to {id, r}
+            setDebrisList(compact.map((d: any) => ({ 
+              id: d[0], 
+              r: [d[1], d[2], d[3]] 
+            })));
             setCounts({
-              satellites: msg.sat_count || 0,
-              debris:     msg.debris_count || 0,
+              satellites: msg.sat_count || (msg.satellites || []).length,
+              debris:     msg.debris_count || compact.length,
               at_risk:    (msg.satellites||[]).filter((s:LiveSat) =>
                 s.status==='AT_RISK'||s.status==='MANEUVERING').length,
             });
@@ -238,6 +241,8 @@ export function GlobeView({
   const cameraRef   = useRef<any>(null);
   const rendererRef = useRef<any>(null);
   const globeRef    = useRef<any>(null);
+  const earthRef    = useRef<any>(null);
+  const debrisPointsRef = useRef<any>(null);
   const groupRef    = useRef<any>(null);   // globe + satellites group
   const rafRef      = useRef<number>(0);
   const dragRef     = useRef({ dragging: false, lastX: 0, lastY: 0, velX: 0, velY: 0 });
@@ -245,7 +250,6 @@ export function GlobeView({
   const autoSpinRef = useRef(true);
   const satMeshesRef = useRef<Record<string, any>>({});
   const orbitLinesRef = useRef<Record<string, any>>({});
-  const debrisMeshesRef = useRef<Record<string, any>>({});
   const glowTextureRef = useRef<any>(null);
   const ringTextureRef = useRef<any>(null);
   const [THREE, setTHREE] = useState<any>(null);
@@ -291,10 +295,18 @@ export function GlobeView({
     const geo  = new THREE.SphereGeometry(1, 64, 64);
     const loader = new THREE.TextureLoader();
     const tex  = loader.load(imgFrame3);
-    const mat  = new THREE.MeshPhongMaterial({ map: tex, specular: new THREE.Color(0x222244), shininess: 15 });
+    const mat  = new THREE.MeshPhongMaterial({ map: tex, specular: new THREE.Color(0x111122), shininess: 8 });
     const globe = new THREE.Mesh(geo, mat);
+    earthRef.current = globe;
     group.add(globe);
     globeRef.current = globe;
+
+    // GPU-Optimized Debris (Points + BufferGeometry)
+    const pointsGeo = new THREE.BufferGeometry();
+    const pointsMat = new THREE.PointsMaterial({ color: 0x8899aa, size: 0.012, sizeAttenuation: true });
+    const pointsMesh = new THREE.Points(pointsGeo, pointsMat);
+    group.add(pointsMesh);
+    debrisPointsRef.current = pointsMesh;
 
     // Build a dedicated radial texture so glow is visible beyond the satellite icon edges.
     if (!glowTextureRef.current) {
@@ -369,8 +381,11 @@ export function GlobeView({
     obs.observe(el);
 
     // Animate loop
-    const animate = () => {
-      rafRef.current = requestAnimationFrame(animate);
+    const loop = () => {
+      rafRef.current = requestAnimationFrame(loop);
+      if (earthRef.current) {
+        earthRef.current.rotation.y = gmstRadAt(new Date());
+      }
       // Auto-spin when not dragging
       if (autoSpinRef.current && !dragRef.current.dragging) {
         rotRef.current.y += 0.0015;
@@ -411,7 +426,7 @@ export function GlobeView({
 
       renderer.render(scene, camera);
     };
-    animate();
+    loop();
     setReady(true);
 
     return () => {
@@ -583,29 +598,19 @@ export function GlobeView({
       }
     });
 
-    // ── Debris ──
-    debrisList.forEach(deb => {
-      if (!deb.r || deb.r.length < 3) return;
-      if (!debrisMeshesRef.current[deb.id]) {
-        const geo = new THREE.SphereGeometry(0.008, 6, 6);
-        const mat = new THREE.MeshBasicMaterial({ color: 0x888888 });
-        const mesh = new THREE.Mesh(geo, mat);
-        group.add(mesh);
-        debrisMeshesRef.current[deb.id] = mesh;
-      }
-      const mesh = debrisMeshesRef.current[deb.id];
-      const [x, y, z] = eciToThree(deb.r, norm3(deb.r) - 6378.137);
-      mesh.position.set(x, y, z);
-    });
-
-    // Remove stale debris meshes
-    Object.keys(debrisMeshesRef.current).forEach(id => {
-      if (!debrisList.find(d => d.id === id)) {
-        group.remove(debrisMeshesRef.current[id]);
-        delete debrisMeshesRef.current[id];
-      }
-    });
-
+    // Debris Visualization (Optimized Points loop)
+    if (debrisPointsRef.current && debrisList.length > 0) {
+      const positions = new Float32Array(debrisList.length * 3);
+      debrisList.forEach((deb, i) => {
+        if (!deb.r) return;
+        const [x, y, z] = eciToThree(deb.r, norm3(deb.r) - 6378.137);
+        positions[i*3] = x;
+        positions[i*3+1] = y;
+        positions[i*3+2] = z;
+      });
+      debrisPointsRef.current.geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+      debrisPointsRef.current.geometry.attributes.position.needsUpdate = true;
+    }
   }, [THREE, satellites, debrisList, selectedId, ready, eciToThree]);
 
   // Mouse handlers
@@ -1303,7 +1308,20 @@ function ManeuverTimelineModule() {
 // ── Main Dashboard ────────────────────────────────────────────────────────────
 export default function EnhancedDashboard() {
   const { satellites: liveSats, debrisList, counts, connected, istTime } = useLiveData();
-  const [selectedId, setSelectedId] = useState<string>('');
+  const [selectedId,  setSelectedId]  = useState<string>('');
+
+  // Optimization: Prune 10k items to candidates once per selection/WS update
+  const candidateRadarPool = useMemo(() => {
+    const sel = liveSats.find(s => s.id === selectedId);
+    if (!sel || !debrisList.length) return [];
+    return debrisList.filter(deb => {
+      const dx = deb.r[0] - sel.r[0];
+      const dy = deb.r[1] - sel.r[1];
+      const dz = deb.r[2] - sel.r[2];
+      return (dx*dx+dy*dy+dz*dz) < 1000000; // 1000km range
+    });
+  }, [debrisList, selectedId, liveSats]);
+
   const [openTabIds, setOpenTabIds] = useState<string[]>([]);
   const [showAddModal, setShowAddModal] = useState(false);
   const [viewport, setViewport] = useState({

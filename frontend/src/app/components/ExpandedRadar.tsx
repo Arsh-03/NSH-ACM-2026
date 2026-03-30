@@ -25,7 +25,7 @@
  * ═══════════════════════════════════════════════════════════════════════════════
  */
 
-import { useState, useEffect, useCallback, useRef, memo } from 'react';
+import { useState, useEffect, useCallback, useRef, memo, useMemo } from 'react';
 import { createPortal } from 'react-dom';
 import { motion, AnimatePresence } from 'motion/react';
 
@@ -80,12 +80,14 @@ const NORMAL = {
 
 const EXPANDED = {
   R:        280,
-  MAX_KM:   2000,
+  MAX_KM:   500,     // 1x base range; higher zoom levels reduce this range.
   CX:       300,
   CY:       300,
   RINGS:    [0.25, 0.5, 0.75, 1.0] as const,
-  RING_KM:  [500, 1000, 1500, 2000] as const,
 } as const;
+
+const ZOOM_LEVELS = [1, 2, 4, 8] as const;
+type ZoomLevel = typeof ZOOM_LEVELS[number];
 
 // ── Distance normalization ─────────────────────────────────────────────────────
 
@@ -108,7 +110,7 @@ const EXPANDED = {
 function projectDebris(
   deb: DebrisItem,
   sat: Satellite,
-  config: typeof NORMAL | typeof EXPANDED,
+  config: { R: number; MAX_KM: number; CX: number; CY: number },
 ): { rx: number; ry: number; distKm: number; inRange: boolean } {
   const dx = deb.r[0] - sat.r[0];
   const dy = deb.r[1] - sat.r[1];
@@ -180,18 +182,41 @@ function ScanLine({ cx, cy, r, color = '#3a7fff' }: { cx: number; cy: number; r:
 const ExpandedRadarSVG = memo(function ExpandedRadarSVG({
   satellite,
   debrisList,
+  zoom,
 }: {
   satellite: Satellite;
   debrisList: DebrisItem[];
+  zoom: ZoomLevel;
 }) {
-  const { R, CX, CY, MAX_KM } = EXPANDED;
+  const { R, CX, CY } = EXPANDED;
+  const MAX_KM = EXPANDED.MAX_KM / zoom;
+  const ringKm = [0.25, 0.5, 0.75, 1].map((f) => MAX_KM * f);
+  const criticalKm = Math.min(100, MAX_KM * 0.4);
   const [hoveredId, setHoveredId] = useState<string | null>(null);
 
-  // Project all debris into expanded coordinates
-  const projected = debrisList
-    .filter((d) => d.r?.length === 3)
-    .map((deb) => ({ deb, ...projectDebris(deb, satellite, EXPANDED) }))
-    .filter((d) => d.distKm <= MAX_KM);    // only show within 2000 km
+  // ── Optimization: Candidate Pool ──
+  const candidateDebris = useMemo(() => {
+    if (!satellite.r || !debrisList.length) return [];
+    return debrisList.filter((d: DebrisItem) => {
+      if (!d.r) return false;
+      const dx = d.r[0] - satellite.r[0];
+      const dy = d.r[1] - satellite.r[1];
+      const dz = d.r[2] - satellite.r[2];
+      return (dx*dx + dy*dy + dz*dz) < 1000000; // 1000km buffer
+    });
+  }, [debrisList, satellite.id]);
+
+  // Project candidates into expanded coordinates
+  const projected = useMemo(() => {
+    return candidateDebris
+      .filter((d: DebrisItem) => d.r?.length === 3)
+      .map((deb: DebrisItem) => ({
+        deb,
+        ...projectDebris(deb, satellite, { ...EXPANDED, MAX_KM }),
+      }))
+      .filter((d) => d.distKm <= MAX_KM)
+      .sort((a, b) => a.distKm - b.distKm); // SORT BY DISTANCE
+  }, [candidateDebris, satellite.r, MAX_KM]);
 
   // Find closest debris for highlight
   const closest = projected.length > 0
@@ -234,7 +259,7 @@ const ExpandedRadarSVG = memo(function ExpandedRadarSVG({
        * Each ring represents half the distance of the normal radar — much finer
        * resolution for conjunction analysis.
        */}
-      {EXPANDED.RING_KM.map((km, i) => {
+      {ringKm.map((km, i) => {
         const ringR = (km / MAX_KM) * R;
         return (
           <g key={km}>
@@ -253,7 +278,7 @@ const ExpandedRadarSVG = memo(function ExpandedRadarSVG({
               fontSize="10"
               fontFamily="Azeret Mono, monospace"
             >
-              {km < 1000 ? `${km}km` : `${km / 1000}Mm`}
+              {km < 1000 ? `${km.toFixed(1)}km` : `${(km / 1000).toFixed(2)}Mm`}
             </text>
           </g>
         );
@@ -303,8 +328,8 @@ const ExpandedRadarSVG = memo(function ExpandedRadarSVG({
         if (!inRange) return null;
 
         const isClosestObj = closest?.deb.id === deb.id;
-        const isVeryClose  = distKm < 100;
-        const isClose      = distKm < 500;
+        const isVeryClose  = distKm < criticalKm;
+        const isClose      = distKm < MAX_KM;
         const isHovered    = hoveredId === deb.id;
 
         const dotColor = isVeryClose ? '#ff4444' : isClose ? '#f59e0b' : '#8892a4';
@@ -466,6 +491,11 @@ function RadarModal({
   debrisList: DebrisItem[];
   onClose: () => void;
 }) {
+  const [zoom, setZoom] = useState<ZoomLevel>(1);
+  const maxKm = EXPANDED.MAX_KM / zoom;
+  const ringKm = maxKm * 0.25;
+  const criticalKm = Math.min(100, maxKm * 0.4);
+
   // Escape key listener
   useEffect(() => {
     const handler = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
@@ -542,8 +572,38 @@ function RadarModal({
               BULLSEYE RADAR — EXPANDED VIEW
             </p>
             <p style={{ color: '#8892a4', fontSize: 11, fontFamily: 'Azeret Mono, monospace', marginLeft: 4 }}>
-              {satellite.name} · 2000 km RANGE · 500 km RINGS
+              {satellite.name} · {maxKm.toFixed(1)} km RANGE · {ringKm.toFixed(1)} km RINGS
             </p>
+
+            <div style={{
+              display: 'flex',
+              gap: 6,
+              marginLeft: 12,
+              alignItems: 'center',
+              flexShrink: 0,
+            }}>
+              {ZOOM_LEVELS.map((level) => {
+                const active = zoom === level;
+                return (
+                  <button
+                    key={level}
+                    onClick={() => setZoom(level)}
+                    style={{
+                      background: active ? 'rgba(58,127,255,0.22)' : 'rgba(255,255,255,0.04)',
+                      border: `1px solid ${active ? 'rgba(58,127,255,0.8)' : '#1f3c5e'}`,
+                      color: active ? '#3a7fff' : '#8892a4',
+                      borderRadius: 4,
+                      padding: '3px 8px',
+                      fontSize: 10,
+                      fontFamily: 'Azeret Mono, monospace',
+                      cursor: 'pointer',
+                    }}
+                  >
+                    {level}x
+                  </button>
+                );
+              })}
+            </div>
 
             {/* Scale indicator badge */}
             <div style={{
@@ -563,7 +623,7 @@ function RadarModal({
                 fontFamily: 'Azeret Mono, monospace',
                 letterSpacing: 0.5,
               }}>
-                4× ZOOM
+                {zoom}x ZOOM
               </div>
 
               {/* Close button */}
@@ -603,7 +663,7 @@ function RadarModal({
 
           {/* ── Radar SVG area ── */}
           <div style={{ flex: 1, minHeight: 0, padding: 16 }}>
-            <ExpandedRadarSVG satellite={satellite} debrisList={debrisList} />
+            <ExpandedRadarSVG satellite={satellite} debrisList={debrisList} zoom={zoom} />
           </div>
 
           {/* ── Footer info bar ── */}
@@ -616,9 +676,9 @@ function RadarModal({
             flexShrink: 0,
           }}>
             {[
-              { color: '#ff4444', label: '< 100 km — CRITICAL' },
-              { color: '#f59e0b', label: '< 500 km — WARNING' },
-              { color: '#8892a4', label: '< 2000 km — TRACKED' },
+              { color: '#ff4444', label: `< ${criticalKm.toFixed(1)} km — CRITICAL` },
+              { color: '#f59e0b', label: `< ${maxKm.toFixed(1)} km — WARNING` },
+              { color: '#8892a4', label: `< ${maxKm.toFixed(1)} km — TRACKED` },
             ].map(({ color, label }) => (
               <div key={label} style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                 <div style={{ width: 8, height: 8, borderRadius: '50%', background: color, flexShrink: 0 }} />
@@ -710,87 +770,85 @@ export function ExpandableBullseye({
   // is self-contained. You can instead import BullseyeRadarInline from
   // EnhancedDashboard if you export it.
   const CX = 210, CY = 205, R = 178;
-
+  const RADAR_MAX_KM = 250;
   return (
-    // Relative positioning context for the expand button
-    <div style={{ position: 'relative', height: '100%' }}>
-
-      {/* ── Expand button (floats over the inline radar) ── */}
+    <div style={{
+      height: '100%',
+      display: 'flex',
+      flexDirection: 'column',
+      padding: '10px',
+      margin: '8px',
+      border: '1px solid #1f3c5e',
+      borderRadius: '8px',
+      background: '#0B1124',
+      boxSizing: 'border-box',
+      minHeight: 0,
+      position: 'relative'
+    }}>
+      {/* Expand button (top right) */}
       {satellite && <ExpandButton onClick={open} />}
+      
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
+        <motion.div style={{ width: 6, height: 6, borderRadius: '50%', background: '#3a7fff', flexShrink: 0 }}
+          animate={{ opacity:[1,0.3,1] }} transition={{ duration:1.5, repeat:Infinity }} />
+        <p style={{ color: '#3a7fff', fontSize: 13, fontFamily: 'Azeret Mono, monospace', letterSpacing: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+          RADAR — {satellite?.name ?? 'NO TARGET'}
+        </p>
+      </div>
+      <svg viewBox="-60 0 480 410" style={{ width: '100%', height: '100%', display: 'block' }}>
+        {[R, R*0.75, R*0.5, R*0.25].map((r, i) => (
+          <circle key={i} cx={CX} cy={CY} r={r} fill="none" stroke="#B3B3B3" strokeWidth="1" opacity={0.7} />
+        ))}
+        <line x1={CX-R-14} y1={CY} x2={CX+R+14} y2={CY} stroke="#B3B3B3" strokeWidth="0.7" />
+        <line x1={CX} y1={CY-R-14} x2={CX} y2={CY+R+14} stroke="#B3B3B3" strokeWidth="0.7" />
+        {[['N',CX-5,CY-R-16],['S',CX-5,CY+R+22],['W',CX-R-22,CY+5],['E',CX+R+8,CY+5]].map(([d,x,y])=>(
+          <text key={d as string} x={x as number} y={y as number} fill="#555" fontSize="11" fontFamily="Azeret Mono, monospace">{d}</text>
+        ))}
+        {[['62.5km',CX+4,CY-R*0.25+5],['125km',CX+4,CY-R*0.5+5],['187.5km',CX+4,CY-R*0.75+5],['250km',CX+4,CY-R+5]].map(([l,x,y])=>(
+          <text key={l as string} x={x as number} y={y as number} fill="#8892a4" fontSize="9" fontFamily="Azeret Mono, monospace">{l}</text>
+        ))}
+        <g>
+          <line x1={CX} y1={CY} x2={CX+R} y2={CY} stroke="#3a7fff" strokeWidth="1.5" opacity="0.6">
+            <animateTransform attributeName="transform" type="rotate" from={`0 ${CX} ${CY}`} to={`360 ${CX} ${CY}`} dur="3s" repeatCount="indefinite" />
+          </line>
+        </g>
+        <circle cx={CX} cy={CY} r={8} fill="none" stroke="#3a7fff" strokeWidth="1.5" />
+        <circle cx={CX} cy={CY} r={2} fill="#3a7fff" />
 
-      {/* ── Existing inline radar (completely unchanged) ── */}
-      <div style={{
-        height: '100%',
-        display: 'flex',
-        flexDirection: 'column',
-        padding: '10px',
-        margin: '8px',
-        border: '1px solid #1f3c5e',
-        borderRadius: '8px',
-        background: '#0B1124',
-        boxSizing: 'border-box',
-        minHeight: 0,
-      }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
-          <motion.div
-            style={{ width: 6, height: 6, borderRadius: '50%', background: '#3a7fff', flexShrink: 0 }}
-            animate={{ opacity: [1, 0.3, 1] }}
-            transition={{ duration: 1.5, repeat: Infinity }}
-          />
-          <p style={{
-            color: '#3a7fff', fontSize: 13, fontFamily: 'Azeret Mono, monospace',
-            letterSpacing: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-          }}>
-            BULLSEYE — {satellite?.name ?? 'NO TARGET'}
-          </p>
-        </div>
+        {/* ── Optimization: Inline Candidate Pool ── */}
+        {(() => {
+          if (!satellite || !satellite.r) return null;
+          const inRange = debrisList.filter(deb => {
+            if (!deb.r) return false;
+            const dx = deb.r[0] - satellite.r[0];
+            const dy = deb.r[1] - satellite.r[1];
+            const dz = deb.r[2] - satellite.r[2];
+            return (dx*dx+dy*dy+dz*dz) < (RADAR_MAX_KM*RADAR_MAX_KM);
+          }).slice(0, 40);
 
-        <svg viewBox="-60 0 480 410" style={{ width: '100%', height: '100%', display: 'block' }}>
-          {[R, R * 0.75, R * 0.5, R * 0.25].map((r, i) => (
-            <circle key={i} cx={CX} cy={CY} r={r} fill="none" stroke="#B3B3B3" strokeWidth="1" opacity={0.7} />
-          ))}
-          <line x1={CX - R - 14} y1={CY} x2={CX + R + 14} y2={CY} stroke="#B3B3B3" strokeWidth="0.7" />
-          <line x1={CX} y1={CY - R - 14} x2={CX} y2={CY + R + 14} stroke="#B3B3B3" strokeWidth="0.7" />
-          {([['N', CX - 5, CY - R - 16], ['S', CX - 5, CY + R + 22], ['W', CX - R - 22, CY + 5], ['E', CX + R + 8, CY + 5]] as const).map(([d, x, y]) => (
-            <text key={d} x={x} y={y} fill="#555" fontSize="11" fontFamily="Azeret Mono, monospace">{d}</text>
-          ))}
-          <g>
-            <line x1={CX} y1={CY} x2={CX + R} y2={CY} stroke="#3a7fff" strokeWidth="1.5" opacity="0.6">
-              <animateTransform attributeName="transform" type="rotate"
-                from={`0 ${CX} ${CY}`} to={`360 ${CX} ${CY}`} dur="3s" repeatCount="indefinite" />
-            </line>
-          </g>
-          {/* Satellite center */}
-          <circle cx={CX} cy={CY} r={8} fill="none" stroke="#3a7fff" strokeWidth="1.5" />
-          <circle cx={CX} cy={CY} r={2} fill="#3a7fff" />
-
-          {satellite && debrisList.map((deb, idx) => {
-            if (!deb.r || deb.r.length < 3 || !satellite.r || satellite.r.length < 3) return null;
+          return inRange.map((deb, idx) => {
             const dx = deb.r[0] - satellite.r[0], dy = deb.r[1] - satellite.r[1], dz = deb.r[2] - satellite.r[2];
             const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
-            if (dist > 5000) return null;
-            const sc = R / 5000;
+            const sc = R / RADAR_MAX_KM;
             const rx = CX + dx * sc, ry = CY - dz * sc;
             if (rx < 5 || rx > 415 || ry < 5 || ry > 405) return null;
-            const isClose = dist < 100;
+            const isVeryClose = dist < 150;
             return (
               <g key={deb.id}>
-                <line x1={CX} y1={CY} x2={rx} y2={ry} stroke={isClose ? '#ff6644' : '#f59e0b'} strokeWidth="0.8" opacity="0.4" strokeDasharray="3 3" />
-                <motion.circle cx={rx} cy={ry} r={isClose ? 5 : 4} fill={isClose ? '#ff4444' : '#f59e0b'}
-                  animate={{ opacity: isClose ? [1, 0.2, 1] : [0.5, 1, 0.5] }}
-                  transition={{ duration: isClose ? 0.8 : 2, repeat: Infinity }} />
-                <text x={rx + 6} y={ry - 4} fill={isClose ? '#ff6644' : '#f59e0b'} fontSize="13" fontFamily="Azeret Mono, monospace">
-                  BT-{String(idx + 1).padStart(3, '0')}
+                <line x1={CX} y1={CY} x2={rx} y2={ry} stroke={isVeryClose ? '#ff6644' : '#f59e0b'} strokeWidth="0.8" opacity="0.4" strokeDasharray="3 3" />
+                <motion.circle cx={rx} cy={ry} r={isVeryClose ? 5 : 4} fill={isVeryClose ? '#ff4444' : '#f59e0b'}
+                  animate={{ opacity: isVeryClose ? [1, 0.2, 1] : [0.5, 1, 0.5] }}
+                  transition={{ duration: isVeryClose ? 0.8 : 2, repeat: Infinity }} />
+                <text x={rx + 6} y={ry - 1} fill={isVeryClose ? '#ff6644' : '#f59e0b'} fontSize="11" fontFamily="Azeret Mono, monospace">
+                  DEB-{deb.id.slice(-4)}
                 </text>
-                <text x={rx + 6} y={ry + 8} fill={isClose ? '#ff4444' : '#8892a4'} fontSize="12" fontFamily="Azeret Mono, monospace">
-                  {dist < 1000 ? `${dist.toFixed(0)}km` : `${(dist / 1000).toFixed(1)}Mm`}
+                <text x={rx + 6} y={ry + 9} fill={isVeryClose ? '#ff4444' : '#8892a4'} fontSize="10" fontFamily="Azeret Mono, monospace">
+                  {dist.toFixed(0)}km
                 </text>
               </g>
             );
-          })}
-          {[['1000km', CX + 4, CY - R * 0.25 + 5], ['2500km', CX + 4, CY - R * 0.5 + 5], ['3750km', CX + 4, CY - R * 0.75 + 5], ['5000km', CX + 4, CY - R + 5]].map(([l, x, y]) => (
-            <text key={l as string} x={x as number} y={y as number} fill="#8892a4" fontSize="9" fontFamily="Azeret Mono, monospace">{l}</text>
-          ))}
+          });
+        })()}
           {satellite && (
             <g>
               <rect x="-125" y="342" width="165" height="70" rx="5" fill="#0e1b2e" opacity="0.92" />
@@ -805,8 +863,6 @@ export function ExpandableBullseye({
             </g>
           )}
         </svg>
-      </div>
-
       {/* ── Modal (portal, only mounted when isExpanded) ── */}
       <AnimatePresence>
         {isExpanded && satellite && (

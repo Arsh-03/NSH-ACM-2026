@@ -136,25 +136,30 @@ function SatelliteTooltip({ sat }: { sat: SimSatellite & { name?: string; altitu
  *   (at-risk stays at 0.55 so alerts remain visible).
  */
 interface SatelliteMarkerProps {
-  sat: SimSatellite;
+  id: string;
+  lat: number;
+  lon: number;
+  alt: number;
+  fuel: number;
+  status: string;
   isSelected: boolean;
   anySelected: boolean;
   onClick: (id: string) => void;
 }
 
 const SatelliteMarker = memo(function SatelliteMarker({
-  sat, isSelected, anySelected, onClick,
+  id, lat, lon, alt, fuel, status, isSelected, anySelected, onClick,
 }: SatelliteMarkerProps) {
   const [hovered, setHovered] = useState(false);
-  const isAtRisk   = sat.status === 'AT_RISK' || sat.status === 'MANEUVERING';
+  const isAtRisk   = status === 'AT_RISK' || status === 'MANEUVERING';
   const dotColor   = isAtRisk ? '#ff6644' : isSelected ? '#00d4ff' : '#3a7fff';
   const dotSize    = isSelected ? 10 : 7;
   const glowSize   = isSelected ? 12 : hovered ? 9 : 5;
   const dimOpacity = anySelected && !isSelected ? (isAtRisk ? 0.55 : 0.32) : 1;
 
   // Convert simulation lat/lon to percentage CSS position
-  const x = ((sat.lon + 180) / 360) * 100;
-  const y = ((90 - sat.lat) / 180) * 100;
+  const x = ((lon + 180) / 360) * 100;
+  const y = ((90 - lat) / 180) * 100;
 
   return (
     <div style={{
@@ -165,13 +170,13 @@ const SatelliteMarker = memo(function SatelliteMarker({
       opacity: dimOpacity,
       transition: 'opacity 300ms ease',
     }}>
-      {hovered && <SatelliteTooltip sat={sat as any} />}
+      {hovered && <SatelliteTooltip sat={{ id, lat, lon, alt, fuel, status } as any} />}
 
       <button
-        onClick={() => onClick(sat.id)}
+        onClick={() => onClick(id)}
         onMouseEnter={() => setHovered(true)}
         onMouseLeave={() => setHovered(false)}
-        aria-label={`Select satellite ${sat.id}`}
+        aria-label={`Select satellite ${id}`}
         style={{
           background: 'none', border: 'none', cursor: 'pointer',
           padding: 6, margin: -6,
@@ -217,7 +222,7 @@ const SatelliteMarker = memo(function SatelliteMarker({
           whiteSpace: 'nowrap', textShadow: `0 0 10px ${dotColor}`,
           pointerEvents: 'none', letterSpacing: 0.5, fontWeight: 600,
         }}>
-          {sat.id}
+          {id}
         </span>
       )}
     </div>
@@ -241,7 +246,12 @@ const SatelliteMarkers = memo(function SatelliteMarkers({
       {sats.map(sat => (
         <SatelliteMarker
           key={sat.id}
-          sat={sat}
+          id={sat.id}
+          lat={sat.lat}
+          lon={sat.lon}
+          alt={sat.alt}
+          fuel={sat.fuel}
+          status={sat.status}
           isSelected={sat.id === mapSelectedId}
           anySelected={anySelected}
           onClick={onMarkerClick}

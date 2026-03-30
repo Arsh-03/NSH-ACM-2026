@@ -85,38 +85,32 @@ async def websocket_endpoint(websocket: WebSocket):
 async def _send_state(websocket: WebSocket):
     from src.api.telemetry import orbital_registry
 
-    satellites, debris = [], []
-
+    satellites, debris_compact = [], []
     for obj_id, data in orbital_registry.items():
-        # Skip malformed entries
-        if not data.get("r") or not data.get("v"):
+        if not data.get("r"):
             continue
-        if not obj_id:
-            continue
-
-        obj = {
-            "id":   str(obj_id),
-            "r":    [float(x) for x in data["r"]],
-            "v":    [float(x) for x in data["v"]],
-            "fuel": float(data.get("fuel_mass", 50.0)),
-            "type": str(data.get("type", "UNKNOWN")),
-        }
-
         if data.get("type") == "SATELLITE":
-            obj["status"]    = str(data.get("status", "NOMINAL"))
-            obj["last_burn"] = float(data.get("last_burn", 0))
-            satellites.append(obj)
+            satellites.append({
+                "id": str(obj_id),
+                "r": [float(x) for x in data["r"]],
+                "v": [float(x) for x in data["v"]],
+                "fuel": float(data.get("fuel_mass", 50.0)),
+                "status": str(data.get("status", "NOMINAL")),
+                "last_burn": float(data.get("last_burn", 0)),
+                "type": "SATELLITE"
+            })
         elif data.get("type") == "DEBRIS":
-            debris.append(obj)
+            # Compact format: [id, x, y, z]
+            r = data["r"]
+            debris_compact.append([str(obj_id), float(r[0]), float(r[1]), float(r[2])])
 
     payload = {
-        "type":         "state_update",
-        "timestamp":    float(time.time()),
-        "satellites":   satellites,
-        "debris":       debris,
-        "sat_count":    int(len(satellites)),
-        "debris_count": int(len(debris)),
-        "total":        int(len(orbital_registry)),
+        "type": "state_update",
+        "timestamp": float(time.time()),
+        "satellites": satellites,
+        "debris_compact": debris_compact,
+        "sat_count": len(satellites),
+        "debris_count": len(debris_compact),
     }
     await websocket.send_text(json.dumps(payload))
 
