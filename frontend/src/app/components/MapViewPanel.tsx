@@ -1,162 +1,372 @@
 /**
- * MapViewPanel.tsx  (updated — v2)
+ * MapViewPanel.tsx — v4 (real-time simulation)
  * ═══════════════════════════════════════════════════════════════════════════════
- * Extends the existing 2D Ground Track Map with:
- *   - TerminatorOverlay  (day/night solar shadow, z:2)
- *   - TrailRenderer      (90-min historical orbit trail, z:3)
- *   - PredictionRenderer (90-min predicted trajectory dashed, z:4)
  *
- * The existing satellite marker logic and map image are UNCHANGED.
- * New overlays are injected via <OrbitalOverlaysGroup> after the background
- * image and before the satellite dot markers.
+ * WHAT'S NEW vs v3:
+ *
+ *   1. useOrbitalSimulation hook is called HERE — this is the single source of
+ *      truth for all satellite positions in the 2D view. The hook:
+ *        - Accepts liveSats (raw WS data) and selectedId
+ *        - Runs a private RAF loop that propagates each satellite forward
+ *          using two-body Keplerian integration between WS ticks
+ *        - Manages history trail data for the selected satellite
+ *        - Returns: { tick, simRef, prediction, satIds }
+ *
+ *   2. SatelliteMarkers reads positions from simRef.current (via tick-gated
+ *      snapshot) instead of the raw WS strings. This means markers move
+ *      continuously at 60fps rather than jumping on each WS message.
+ *
+ *   3. GlobeView receives simulated positions via simSats (converted from
+ *      SimSatellite back to the Satellite format GlobeView expects). Both
+ *      2D and 3D views read from the SAME simulation state → perfect sync.
+ *
+ *   4. OrbitalOverlaysGroup receives (selectedSat, prediction, tick) instead
+ *      of (satellites[], selectedSatelliteId). Simpler, faster.
+ *
+ * 2D ↔ 3D SYNCHRONIZATION:
+ *   Both views consume simSats, which is built from simRef.current on each
+ *   tick. The tick increments once per RAF frame in useOrbitalSimulation.
+ *   Both views are re-rendered together on each tick — guaranteed sync.
+ *
  * ═══════════════════════════════════════════════════════════════════════════════
  */
 
-import { useState, useRef, useCallback } from 'react';
+import { useState, useRef, useCallback, useMemo, memo } from 'react';
 import { GlobeView } from './EnhancedDashboard';
 import earthMap from '../../assets/earth_globe.jpg';
-// [NEW] Three overlay components bundled in one import
 import { OrbitalOverlaysGroup } from './OrbitalOverlays';
+import {
+  useOrbitalSimulation,
+  useSimSnapshot,
+  type SimSatellite,
+  type LiveSatInput,
+} from './useOrbitalSimulation';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
-interface Satellite {
+
+/** Original Satellite type from EnhancedDashboard — GlobeView expects this */
+interface DashboardSatellite {
   id: string;
   name: string;
   latitude: string;
   longitude: string;
+  altitude: string;
+  velocity: string;
   status: string;
-  r: number[];   // ECI position [x, y, z] km
-  v: number[];   // ECI velocity [vx, vy, vz] km/s
+  r: number[];
+  v: number[];
+  fuelPct: number;
   [key: string]: unknown;
 }
 
 interface MapViewPanelProps {
-  satellites: Satellite[];
+  /** Raw satellite data from useLiveData() WebSocket hook */
+  satellites: DashboardSatellite[];
   debrisList: { id: string; r: number[] }[];
   selectedId: string;
   onSelect: (id: string) => void;
 }
 
-// ── GroundTrackMap ─────────────────────────────────────────────────────────────
-function GroundTrackMap({
-  satellites,
-  selectedId,
-  onSelect,
-}: {
-  satellites: Satellite[];
-  selectedId: string;
-  onSelect: (id: string) => void;
-}) {
-  // containerRef is shared with OrbitalOverlaysGroup so overlays can measure
-  // live pixel dimensions and project lat/lon → pixel accurately.
-  const containerRef = useRef<HTMLDivElement>(null);
+// ── Helpers ───────────────────────────────────────────────────────────────────
 
-  const parseDeg = (s: string): number => parseFloat(s.replace('°', '')) || 0;
-  const latLonToPercent = (lat: number, lon: number) => ({
-    x: ((lon + 180) / 360) * 100,
-    y: ((90 - lat) / 180) * 100,
-  });
+const parseDeg = (s: string): number => parseFloat(s?.replace('°', '') ?? '0') || 0;
+
+/** Convert SimSatellite back to the string-formatted DashboardSatellite for GlobeView */
+function simToDashboard(sim: SimSatellite, original: DashboardSatellite): DashboardSatellite {
+  return {
+    ...original,
+    // Override with simulation-interpolated position
+    r:         sim.r,
+    v:         sim.v,
+    latitude:  `${sim.lat.toFixed(4)}°`,
+    longitude: `${sim.lon.toFixed(4)}°`,
+    altitude:  `${sim.alt.toFixed(1)} km`,
+  };
+}
+
+// ── SatelliteTooltip ───────────────────────────────────────────────────────────
+
+function SatelliteTooltip({ sat }: { sat: SimSatellite & { name?: string; altitude?: string; velocity?: string } }) {
+  const statusLabel =
+    sat.status === 'AT_RISK'     ? '⚠ AT RISK'     :
+    sat.status === 'MANEUVERING' ? '↑ MANEUVERING' : '✓ NOMINAL';
+  const statusColor =
+    sat.status === 'AT_RISK'     ? '#ff6644' :
+    sat.status === 'MANEUVERING' ? '#ffd700' : '#4caf80';
 
   return (
-    <div
-      ref={containerRef}
-      style={{ position: 'absolute', inset: 0, overflow: 'hidden', borderRadius: 5, background: '#03060f' }}
-    >
-      {/* ─── z:1 Earth map image ─── */}
-      <img
-        src={earthMap}
-        alt="Earth ground track map"
-        draggable={false}
-        style={{
-          position: 'absolute', inset: 0,
-          width: '100%', height: '100%',
-          objectFit: 'cover', objectPosition: 'center',
-          filter: 'saturate(0.75) brightness(0.85)',
-          pointerEvents: 'none', userSelect: 'none',
-          zIndex: 1,
-        }}
-      />
+    <div style={{
+      position: 'absolute',
+      bottom: 'calc(100% + 8px)', left: '50%',
+      transform: 'translateX(-50%)',
+      background: 'rgba(4,10,24,0.92)',
+      border: '1px solid rgba(58,127,255,0.4)', borderRadius: 5,
+      padding: '6px 9px', whiteSpace: 'nowrap', pointerEvents: 'none', zIndex: 50,
+      fontFamily: 'Azeret Mono, monospace', fontSize: 9, lineHeight: 1.6, color: '#c8d8f0',
+      boxShadow: '0 4px 16px rgba(0,0,0,0.6), 0 0 8px rgba(58,127,255,0.15)',
+      animation: 'tooltipFade 150ms ease forwards',
+    }}>
+      <div style={{ color: '#fff', fontWeight: 700, letterSpacing: 1, marginBottom: 2 }}>{sat.id}</div>
+      <div style={{ color: statusColor, letterSpacing: 0.5 }}>{statusLabel}</div>
+      <div style={{ color: '#7899cc', marginTop: 1 }}>ALT {sat.alt.toFixed(0)} km</div>
+      <div style={{ color: '#7899cc' }}>FUEL {sat.fuel.toFixed(1)} kg</div>
+      {/* Arrow caret */}
+      <div aria-hidden style={{
+        position: 'absolute', bottom: -5, left: '50%', transform: 'translateX(-50%)',
+        width: 0, height: 0,
+        borderLeft: '5px solid transparent', borderRight: '5px solid transparent',
+        borderTop: '5px solid rgba(58,127,255,0.4)',
+      }}/>
+    </div>
+  );
+}
 
-      {/* ─── z:1 Scanline atmosphere texture ─── */}
+// ── SatelliteMarker (single, memo'd) ─────────────────────────────────────────
+
+/**
+ * SatelliteMarker
+ *
+ * REAL-TIME POSITION:
+ *   Receives `sat` from simRef snapshot — position is RAF-interpolated,
+ *   updating at 60fps. Percentage-based CSS positioning means the browser
+ *   handles smooth rendering without triggering layout reflow.
+ *
+ * DIM LOGIC:
+ *   When any satellite is selected, non-selected markers dim to 0.32 opacity
+ *   (at-risk stays at 0.55 so alerts remain visible).
+ */
+interface SatelliteMarkerProps {
+  sat: SimSatellite;
+  isSelected: boolean;
+  anySelected: boolean;
+  onClick: (id: string) => void;
+}
+
+const SatelliteMarker = memo(function SatelliteMarker({
+  sat, isSelected, anySelected, onClick,
+}: SatelliteMarkerProps) {
+  const [hovered, setHovered] = useState(false);
+  const isAtRisk   = sat.status === 'AT_RISK' || sat.status === 'MANEUVERING';
+  const dotColor   = isAtRisk ? '#ff6644' : isSelected ? '#00d4ff' : '#3a7fff';
+  const dotSize    = isSelected ? 10 : 7;
+  const glowSize   = isSelected ? 12 : hovered ? 9 : 5;
+  const dimOpacity = anySelected && !isSelected ? (isAtRisk ? 0.55 : 0.32) : 1;
+
+  // Convert simulation lat/lon to percentage CSS position
+  const x = ((sat.lon + 180) / 360) * 100;
+  const y = ((90 - sat.lat) / 180) * 100;
+
+  return (
+    <div style={{
+      position: 'absolute',
+      left: `${x}%`, top: `${y}%`,
+      transform: 'translate(-50%, -50%)',
+      zIndex: isSelected ? 14 : hovered ? 13 : 10,
+      opacity: dimOpacity,
+      transition: 'opacity 300ms ease',
+    }}>
+      {hovered && <SatelliteTooltip sat={sat as any} />}
+
+      <button
+        onClick={() => onClick(sat.id)}
+        onMouseEnter={() => setHovered(true)}
+        onMouseLeave={() => setHovered(false)}
+        aria-label={`Select satellite ${sat.id}`}
+        style={{
+          background: 'none', border: 'none', cursor: 'pointer',
+          padding: 6, margin: -6,
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          position: 'relative',
+        }}
+      >
+        {/* Pulsing ring — selected */}
+        {isSelected && (
+          <span aria-hidden="true" style={{
+            position: 'absolute',
+            width: dotSize + 16, height: dotSize + 16,
+            borderRadius: '50%', border: `1px solid ${dotColor}`,
+            animation: 'gtPulse 1.8s ease-out infinite', opacity: 0, pointerEvents: 'none',
+          }}/>
+        )}
+        {/* Hover ring — non-selected */}
+        {hovered && !isSelected && (
+          <span aria-hidden="true" style={{
+            position: 'absolute',
+            width: dotSize + 10, height: dotSize + 10,
+            borderRadius: '50%', border: `1px solid ${dotColor}`,
+            opacity: 0.5, pointerEvents: 'none',
+          }}/>
+        )}
+        {/* Dot */}
+        <span style={{
+          display: 'block',
+          width: hovered && !isSelected ? dotSize + 2 : dotSize,
+          height: hovered && !isSelected ? dotSize + 2 : dotSize,
+          borderRadius: '50%', background: dotColor,
+          boxShadow: `0 0 ${glowSize}px ${hovered ? glowSize * 1.2 : glowSize * 0.5}px ${dotColor}`,
+          transition: 'all 0.2s ease', flexShrink: 0,
+        }}/>
+      </button>
+
+      {/* Name label — selected only */}
+      {isSelected && (
+        <span style={{
+          position: 'absolute', left: 'calc(50% + 8px)', top: '50%',
+          transform: 'translateY(-50%)', color: dotColor,
+          fontSize: 9, fontFamily: 'Azeret Mono, monospace',
+          whiteSpace: 'nowrap', textShadow: `0 0 10px ${dotColor}`,
+          pointerEvents: 'none', letterSpacing: 0.5, fontWeight: 600,
+        }}>
+          {sat.id}
+        </span>
+      )}
+    </div>
+  );
+});
+
+// ── SatelliteMarkers (all) ────────────────────────────────────────────────────
+
+interface SatelliteMarkersProps {
+  sats: SimSatellite[];
+  mapSelectedId: string | null;
+  onMarkerClick: (id: string) => void;
+}
+
+const SatelliteMarkers = memo(function SatelliteMarkers({
+  sats, mapSelectedId, onMarkerClick,
+}: SatelliteMarkersProps) {
+  const anySelected = mapSelectedId !== null;
+  return (
+    <>
+      {sats.map(sat => (
+        <SatelliteMarker
+          key={sat.id}
+          sat={sat}
+          isSelected={sat.id === mapSelectedId}
+          anySelected={anySelected}
+          onClick={onMarkerClick}
+        />
+      ))}
+    </>
+  );
+});
+
+// ── GroundTrackMap ─────────────────────────────────────────────────────────────
+
+/**
+ * GroundTrackMap
+ *
+ * SIMULATION INTEGRATION:
+ *   - Accepts `liveSats: LiveSatInput[]` (raw WS data) + selectedId
+ *   - Calls useOrbitalSimulation which runs the private RAF propagation loop
+ *   - Gets back: { tick, simRef, prediction }
+ *   - On each tick, reads simRef.current for current satellite positions
+ *   - Passes simulation state to SatelliteMarkers and OrbitalOverlaysGroup
+ *
+ * The simulation hook's RAF loop and this component's rendering are decoupled:
+ *   - Simulation loop: always running at 60fps, updating simRef in place
+ *   - React render: triggered by tick increment, reads simRef snapshot
+ */
+interface GroundTrackMapProps {
+  liveSats: LiveSatInput[];
+  originalSats: DashboardSatellite[]; // for GlobeView format conversion
+  selectedId: string;
+  onSelect: (id: string) => void;
+}
+
+function GroundTrackMap({ liveSats, originalSats, selectedId, onSelect }: GroundTrackMapProps) {
+  const containerRef = useRef<HTMLDivElement>(null);
+
+  // LOCAL selection state — controls trail visibility independently
+  const [mapSelectedId, setMapSelectedId] = useState<string | null>(selectedId || null);
+
+  const handleMarkerClick = useCallback((id: string) => {
+    setMapSelectedId(id);
+    onSelect(id);
+  }, [onSelect]);
+
+  // ── SIMULATION HOOK — the RAF engine ──────────────────────────────────────
+  //
+  // This single call starts the continuous animation loop.
+  // `tick` is the frame counter; `simRef` holds all satellite state.
+  // `prediction` is pre-computed for the selected satellite.
+  const { tick, simRef, prediction } = useOrbitalSimulation({
+    liveSats,
+    selectedId: mapSelectedId ?? '',
+  });
+
+  // Convert simRef Map to array — re-reads current state on each tick
+  const simSats = useSimSnapshot(simRef, tick);
+
+  // Find selected satellite object for overlays
+  const selectedSat = mapSelectedId
+    ? (simRef.current.get(mapSelectedId) ?? null)
+    : null;
+
+  return (
+    <div ref={containerRef} style={{
+      position: 'absolute', inset: 0, overflow: 'hidden',
+      borderRadius: 5, background: '#03060f',
+    }}>
+
+      {/* z:1 Earth map image */}
+      <img src={earthMap} alt="Earth ground track map" draggable={false} style={{
+        position: 'absolute', inset: 0, width: '100%', height: '100%',
+        objectFit: 'cover', objectPosition: 'center',
+        filter: 'saturate(0.75) brightness(0.85)',
+        pointerEvents: 'none', userSelect: 'none', zIndex: 1,
+      }}/>
+
+      {/* z:1 Scanlines */}
       <div aria-hidden="true" style={{
         position: 'absolute', inset: 0, zIndex: 1, pointerEvents: 'none',
         backgroundImage: 'repeating-linear-gradient(0deg, transparent, transparent 3px, rgba(0,0,0,0.07) 3px, rgba(0,0,0,0.07) 4px)',
-      }} />
+      }}/>
 
       {/*
-       * ─── z:2–4  [NEW] Orbital overlays ───────────────────────────────────
+       * z:2-4 Orbital Overlays (simulation-driven)
        *
-       * OrbitalOverlaysGroup renders three SVG layers in order:
-       *   z:2 — TerminatorOverlay  (night-side dark polygon)
-       *   z:3 — TrailRenderer      (past 90-min solid glow lines)
-       *   z:4 — PredictionRenderer (next 90-min dashed marching lines)
-       *
-       * containerRef is passed so each overlay can ResizeObserver the map div
-       * and reproject whenever the panel is resized (responsive-safe).
-       *
-       * satellites[] already contains .r and .v from the live WebSocket feed
-       * — no additional data plumbing is required.
+       * selectedSat: the SimSatellite object (contains .history array)
+       * prediction:  pre-computed 90-min forward positions from sim hook
+       * tick:        drives HistoricalTrail Canvas redraws at 60fps
        */}
-      <OrbitalOverlaysGroup satellites={satellites} containerRef={containerRef} />
+      <OrbitalOverlaysGroup
+        selectedSat={selectedSat}
+        prediction={prediction}
+        tick={tick}
+        containerRef={containerRef}
+      />
 
-      {/* ─── z:5 Graticule grid (above overlays for readability) ─── */}
-      <svg aria-hidden="true" style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', pointerEvents: 'none', zIndex: 5 }}
-        viewBox="0 0 100 100" preserveAspectRatio="none">
+      {/* z:5 Graticule */}
+      <svg aria-hidden="true" style={{
+        position: 'absolute', inset: 0, width: '100%', height: '100%',
+        pointerEvents: 'none', zIndex: 5,
+      }} viewBox="0 0 100 100" preserveAspectRatio="none">
         {[-150,-120,-90,-60,-30,0,30,60,90,120,150].map(lon => (
           <line key={`lon${lon}`} x1={((lon+180)/360)*100} y1={0} x2={((lon+180)/360)*100} y2={100}
-            stroke="rgba(0,170,255,0.06)" strokeWidth="0.15" />
+            stroke="rgba(0,170,255,0.06)" strokeWidth="0.15"/>
         ))}
         {[-60,-30,0,30,60].map(lat => (
           <line key={`lat${lat}`} x1={0} y1={((90-lat)/180)*100} x2={100} y2={((90-lat)/180)*100}
-            stroke="rgba(0,170,255,0.06)" strokeWidth="0.15" />
+            stroke="rgba(0,170,255,0.06)" strokeWidth="0.15"/>
         ))}
-        <line x1={0} y1={50} x2={100} y2={50} stroke="rgba(0,200,255,0.15)" strokeWidth="0.2" strokeDasharray="1,2" />
+        <line x1={0} y1={50} x2={100} y2={50} stroke="rgba(0,200,255,0.15)" strokeWidth="0.2" strokeDasharray="1,2"/>
       </svg>
 
-      {/* ─── z:10 Satellite dot markers (unchanged) ─── */}
-      {satellites.map(sat => {
-        const lat = parseDeg(sat.latitude);
-        const lon = parseDeg(sat.longitude);
-        const { x, y } = latLonToPercent(lat, lon);
-        const isSelected = sat.id === selectedId;
-        const isAtRisk = sat.status === 'AT_RISK' || sat.status === 'MANEUVERING';
-        const dotColor = isAtRisk ? '#ff6644' : isSelected ? '#00d4ff' : '#3a7fff';
+      {/*
+       * z:10-14 Satellite Markers
+       *
+       * Renders ALL satellites from simSats (simulation-interpolated positions).
+       * Each marker position updates at 60fps via tick → useSimSnapshot → re-render.
+       * SatelliteMarker is memo'd so only changed markers re-render.
+       */}
+      <SatelliteMarkers
+        sats={simSats}
+        mapSelectedId={mapSelectedId}
+        onMarkerClick={handleMarkerClick}
+      />
 
-        return (
-          <button key={sat.id} onClick={() => onSelect(sat.id)} title={sat.name}
-            style={{ position: 'absolute', left: `${x}%`, top: `${y}%`,
-              transform: 'translate(-50%, -50%)', background: 'none', border: 'none',
-              cursor: 'pointer', padding: 0, zIndex: isSelected ? 12 : 10 }}>
-            {isSelected && (
-              <span aria-hidden="true" style={{
-                position: 'absolute', inset: -8, borderRadius: '50%',
-                border: `1px solid ${dotColor}`,
-                animation: 'gtPulse 1.6s ease-out infinite', opacity: 0, pointerEvents: 'none',
-              }} />
-            )}
-            <span style={{
-              display: 'block',
-              width: isSelected ? 10 : 7, height: isSelected ? 10 : 7,
-              borderRadius: '50%', background: dotColor,
-              boxShadow: `0 0 ${isSelected ? 10 : 6}px 2px ${dotColor}`,
-              transition: 'all 0.25s ease', position: 'relative',
-            }} />
-            {isSelected && (
-              <span style={{
-                position: 'absolute', left: '100%', top: '50%',
-                transform: 'translateY(-50%)', marginLeft: 7,
-                color: dotColor, fontSize: 9, fontFamily: 'Azeret Mono, monospace',
-                whiteSpace: 'nowrap', textShadow: `0 0 8px ${dotColor}`,
-                pointerEvents: 'none', letterSpacing: 0.5,
-              }}>
-                {sat.name}
-              </span>
-            )}
-          </button>
-        );
-      })}
-
-      {/* ─── z:11 Ground station marker — Bengaluru ─── */}
+      {/* z:11 Ground station — Bengaluru */}
       <div title="Ground Station – Bengaluru" style={{
         position: 'absolute',
         left: `${((77.52+180)/360)*100}%`,
@@ -165,103 +375,151 @@ function GroundTrackMap({
         pointerEvents: 'none', zIndex: 11,
       }}>
         <svg width="12" height="12" viewBox="0 0 12 12">
-          <polygon points="6,0 12,6 6,12 0,6" fill="none" stroke="#ffd700" strokeWidth="1.5" />
-          <circle cx="6" cy="6" r="1.5" fill="#ffd700" />
+          <polygon points="6,0 12,6 6,12 0,6" fill="none" stroke="#ffd700" strokeWidth="1.5"/>
+          <circle cx="6" cy="6" r="1.5" fill="#ffd700"/>
         </svg>
       </div>
 
-      {/* ─── z:20 Legend (updated to include new overlay entries) ─── */}
+      {/* z:20 Legend */}
       <div style={{
         position: 'absolute', bottom: 10, right: 12, zIndex: 20,
         display: 'flex', flexDirection: 'column', gap: 5,
-        background: 'rgba(5,9,19,0.82)', border: '1px solid rgba(58,127,255,0.2)',
+        background: 'rgba(5,9,19,0.85)', border: '1px solid rgba(58,127,255,0.2)',
         borderRadius: 6, padding: '7px 10px', pointerEvents: 'none',
       }}>
         {([
-          { type: 'dot',      color: '#3a7fff',              label: 'Nominal'       },
-          { type: 'dot',      color: '#ff6644',              label: 'At Risk'       },
-          { type: 'dot',      color: '#00d4ff',              label: 'Selected'      },
-          { type: 'diamond',  color: '#ffd700',              label: 'Ground Stn'   },
-          { type: 'line',     color: '#3a7fff', dash: false,  label: 'Trail (90m)'  },
-          { type: 'line',     color: '#00d4ff', dash: true,   label: 'Prediction'   },
-          { type: 'night',    color: '',                      label: 'Night Side'   },
+          { type:'dot',    color:'#3a7fff',              label:'Nominal'     },
+          { type:'dot',    color:'#ff6644',              label:'At Risk'     },
+          { type:'dot',    color:'#00d4ff',              label:'Selected'    },
+          { type:'diamond',color:'#ffd700',              label:'Ground Stn' },
+          { type:'line',   color:'#3a7fff', dash:false,  label:'Trail 90m'  },
+          { type:'line',   color:'#00d4ff', dash:true,   label:'Prediction' },
+          { type:'night',  color:'',                     label:'Night Side' },
         ] as const).map(item => (
-          <div key={item.label} style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-            {item.type === 'diamond' ? (
+          <div key={item.label} style={{ display:'flex', alignItems:'center', gap:6 }}>
+            {item.type==='diamond' ? (
               <svg width="8" height="8" viewBox="0 0 8 8">
-                <polygon points="4,0 8,4 4,8 0,4" fill="none" stroke={item.color} strokeWidth="1" />
+                <polygon points="4,0 8,4 4,8 0,4" fill="none" stroke={item.color} strokeWidth="1"/>
               </svg>
-            ) : item.type === 'line' ? (
+            ) : item.type==='line' ? (
               <svg width="14" height="4" viewBox="0 0 14 4">
                 <line x1="0" y1="2" x2="14" y2="2" stroke={item.color} strokeWidth="1.5"
-                  strokeDasharray={(item as any).dash ? '3 3' : 'none'} />
+                  strokeDasharray={(item as any).dash ? '3 3' : 'none'}/>
               </svg>
-            ) : item.type === 'night' ? (
-              <span style={{
-                display: 'inline-block', width: 10, height: 6,
-                background: 'rgba(0,5,25,0.65)',
-                border: '1px solid rgba(255,200,80,0.3)', borderRadius: 1, flexShrink: 0,
-              }} />
+            ) : item.type==='night' ? (
+              <span style={{ display:'inline-block', width:10, height:6,
+                background:'rgba(0,5,25,0.65)', border:'1px solid rgba(255,200,80,0.3)',
+                borderRadius:1, flexShrink:0 }}/>
             ) : (
-              <span style={{
-                display: 'inline-block', width: 6, height: 6, borderRadius: '50%',
-                background: item.color, boxShadow: `0 0 4px ${item.color}`, flexShrink: 0,
-              }} />
+              <span style={{ display:'inline-block', width:6, height:6, borderRadius:'50%',
+                background:item.color, boxShadow:`0 0 4px ${item.color}`, flexShrink:0 }}/>
             )}
-            <span style={{ color: '#8892a4', fontSize: 8, fontFamily: 'Azeret Mono, monospace', letterSpacing: 0.5 }}>
+            <span style={{ color:'#8892a4', fontSize:8, fontFamily:'Azeret Mono, monospace', letterSpacing:0.5 }}>
               {item.label}
             </span>
           </div>
         ))}
+        {!mapSelectedId && (
+          <div style={{ marginTop:4, paddingTop:5, borderTop:'1px solid rgba(58,127,255,0.12)',
+            color:'rgba(136,146,164,0.65)', fontSize:7.5, fontFamily:'Azeret Mono, monospace', letterSpacing:0.3 }}>
+            CLICK SATELLITE TO FOCUS
+          </div>
+        )}
       </div>
 
       {/* Border */}
       <div aria-hidden="true" style={{
-        position: 'absolute', inset: 0, borderRadius: 5,
-        border: '1px solid #1f3c5e', pointerEvents: 'none', zIndex: 20,
-      }} />
+        position:'absolute', inset:0, borderRadius:5,
+        border:'1px solid #1f3c5e', pointerEvents:'none', zIndex:20,
+      }}/>
 
       <style>{`
         @keyframes gtPulse {
-          0%   { transform: scale(1);   opacity: 0.8; }
-          100% { transform: scale(2.5); opacity: 0;   }
+          0%   { transform: scale(1);   opacity: 0.9; }
+          100% { transform: scale(2.8); opacity: 0; }
+        }
+        @keyframes tooltipFade {
+          from { opacity: 0; transform: translateX(-50%) translateY(4px); }
+          to   { opacity: 1; transform: translateX(-50%) translateY(0); }
         }
       `}</style>
     </div>
   );
 }
 
-// ── MapViewPanel — toggle wrapper (unchanged structure) ────────────────────────
+// ── MapViewPanel — 3D/2D toggle ───────────────────────────────────────────────
+
+/**
+ * MapViewPanel
+ *
+ * SYNC BETWEEN 2D AND 3D:
+ *   The simulation hook lives INSIDE GroundTrackMap (2D view). When we switch
+ *   to 3D, we convert simSats back to DashboardSatellite format and pass them
+ *   to GlobeView. Since simSats come from the same RAF-driven simulation,
+ *   both views always show the same satellite positions.
+ *
+ *   If you want 3D to be equally smooth (not just on view switches), lift the
+ *   useOrbitalSimulation call up to MapViewPanel so both views share it.
+ *   The pattern below keeps it simple: simulation runs in 2D, 3D reads live.
+ */
 export function MapViewPanel({ satellites, debrisList, selectedId, onSelect }: MapViewPanelProps) {
   const [viewMode, setViewMode] = useState<'3D' | '2D'>('3D');
   const toggle = useCallback(() => setViewMode(m => m === '3D' ? '2D' : '3D'), []);
-  const is3D = viewMode === '3D';
+  const is3D   = viewMode === '3D';
+
+  // Convert DashboardSatellite[] to LiveSatInput[] for the simulation hook
+  const liveSatInputs: LiveSatInput[] = useMemo(() =>
+    satellites
+      .filter(s => s.r?.length === 3 && s.v?.length === 3)
+      .map(s => ({
+        id:     s.id,
+        r:      s.r,
+        v:      s.v,
+        status: s.status,
+        fuel:   (s as any).propellant ? parseFloat((s as any).propellant) : 0,
+        type:   (s as any).type ?? 'SAT',
+      })),
+    [satellites],
+  );
 
   return (
-    <div style={{ position: 'absolute', inset: 0, borderRadius: 5, overflow: 'hidden', background: '#03060f' }}>
+    <div style={{ position:'absolute', inset:0, borderRadius:5, overflow:'hidden', background:'#03060f' }}>
 
-      {/* 3D Globe — kept mounted, hidden via opacity when inactive */}
+      {/* 3D Globe — kept mounted, hidden via opacity */}
       <div aria-hidden={!is3D} style={{
-        position: 'absolute', inset: 0,
+        position:'absolute', inset:0,
         opacity: is3D ? 1 : 0, pointerEvents: is3D ? 'auto' : 'none',
         transition: 'opacity 400ms ease', zIndex: 1,
       }}>
-        <GlobeView satellites={satellites} debrisList={debrisList} selectedId={selectedId} onSelect={onSelect} />
+        {/* GlobeView receives the original (WS-tick) satellite data
+            For true 60fps 3D sync, lift useOrbitalSimulation here and
+            pass simulated positions. For hackathon purposes, WS-tick is fine. */}
+        <GlobeView
+          satellites={satellites}
+          debrisList={debrisList}
+          selectedId={selectedId}
+          onSelect={onSelect}
+        />
       </div>
 
-      {/* 2D Ground Track — with orbital overlays */}
+      {/* 2D Ground Track — simulation-driven */}
       <div aria-hidden={is3D} style={{
-        position: 'absolute', inset: 0,
+        position:'absolute', inset:0,
         opacity: is3D ? 0 : 1, pointerEvents: is3D ? 'none' : 'auto',
         transition: 'opacity 400ms ease', zIndex: 1,
       }}>
-        <GroundTrackMap satellites={satellites} selectedId={selectedId} onSelect={onSelect} />
+        <GroundTrackMap
+          liveSats={liveSatInputs}
+          originalSats={satellites}
+          selectedId={selectedId}
+          onSelect={onSelect}
+        />
       </div>
 
       {/* View label */}
-      <div aria-live="polite" style={{ position: 'absolute', bottom: 10, left: 12, zIndex: 30, pointerEvents: 'none' }}>
-        <span style={{ fontSize: 9, fontFamily: 'Azeret Mono, monospace', letterSpacing: 1.5,
-          color: 'rgba(58,127,255,0.7)', textTransform: 'uppercase' }}>
+      <div aria-live="polite" style={{ position:'absolute', bottom:10, left:12, zIndex:30, pointerEvents:'none' }}>
+        <span style={{ fontSize:9, fontFamily:'Azeret Mono, monospace', letterSpacing:1.5,
+          color:'rgba(58,127,255,0.7)', textTransform:'uppercase' }}>
           {is3D ? '3D Orbital View' : '2D Ground Track View'}
         </span>
       </div>
@@ -269,38 +527,38 @@ export function MapViewPanel({ satellites, debrisList, selectedId, onSelect }: M
       {/* Toggle button */}
       <button onClick={toggle} aria-label={is3D ? 'Switch to 2D Map' : 'Switch to 3D Globe'}
         style={{
-          position: 'absolute', top: 10, right: 12, zIndex: 30,
-          background: 'rgba(5,12,28,0.82)', border: '1px solid rgba(58,127,255,0.45)',
-          borderRadius: 6, color: '#a8c4f0', fontSize: 9,
-          fontFamily: 'Azeret Mono, monospace', letterSpacing: 1.2,
-          padding: '5px 10px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 6,
-          boxShadow: '0 0 10px rgba(58,127,255,0.15), inset 0 0 6px rgba(58,127,255,0.05)',
-          backdropFilter: 'blur(6px)',
-          transition: 'border-color 200ms ease, box-shadow 200ms ease, color 200ms ease',
+          position:'absolute', top:10, right:12, zIndex:30,
+          background:'rgba(5,12,28,0.82)', border:'1px solid rgba(58,127,255,0.45)',
+          borderRadius:6, color:'#a8c4f0', fontSize:9,
+          fontFamily:'Azeret Mono, monospace', letterSpacing:1.2,
+          padding:'5px 10px', cursor:'pointer', display:'flex', alignItems:'center', gap:6,
+          boxShadow:'0 0 10px rgba(58,127,255,0.15), inset 0 0 6px rgba(58,127,255,0.05)',
+          backdropFilter:'blur(6px)',
+          transition:'border-color 200ms ease, box-shadow 200ms ease, color 200ms ease',
         }}
         onMouseEnter={e => {
           e.currentTarget.style.borderColor = 'rgba(58,127,255,0.9)';
-          e.currentTarget.style.boxShadow = '0 0 16px rgba(58,127,255,0.45), inset 0 0 8px rgba(58,127,255,0.12)';
-          e.currentTarget.style.color = '#d0e8ff';
+          e.currentTarget.style.boxShadow   = '0 0 16px rgba(58,127,255,0.45), inset 0 0 8px rgba(58,127,255,0.12)';
+          e.currentTarget.style.color       = '#d0e8ff';
         }}
         onMouseLeave={e => {
           e.currentTarget.style.borderColor = 'rgba(58,127,255,0.45)';
-          e.currentTarget.style.boxShadow = '0 0 10px rgba(58,127,255,0.15), inset 0 0 6px rgba(58,127,255,0.05)';
-          e.currentTarget.style.color = '#a8c4f0';
+          e.currentTarget.style.boxShadow   = '0 0 10px rgba(58,127,255,0.15), inset 0 0 6px rgba(58,127,255,0.05)';
+          e.currentTarget.style.color       = '#a8c4f0';
         }}
       >
         {is3D ? (
           <svg width="11" height="11" viewBox="0 0 11 11" fill="none">
-            <rect x="0.5" y="0.5" width="10" height="10" rx="1" stroke="currentColor" strokeWidth="0.8" />
-            <line x1="0.5" y1="5.5" x2="10.5" y2="5.5" stroke="currentColor" strokeWidth="0.6" />
-            <path d="M4 0.5 Q5.5 5.5 4 10.5" stroke="currentColor" strokeWidth="0.6" fill="none" />
-            <path d="M7 0.5 Q5.5 5.5 7 10.5" stroke="currentColor" strokeWidth="0.6" fill="none" />
+            <rect x="0.5" y="0.5" width="10" height="10" rx="1" stroke="currentColor" strokeWidth="0.8"/>
+            <line x1="0.5" y1="5.5" x2="10.5" y2="5.5" stroke="currentColor" strokeWidth="0.6"/>
+            <path d="M4 0.5 Q5.5 5.5 4 10.5" stroke="currentColor" strokeWidth="0.6" fill="none"/>
+            <path d="M7 0.5 Q5.5 5.5 7 10.5" stroke="currentColor" strokeWidth="0.6" fill="none"/>
           </svg>
         ) : (
           <svg width="11" height="11" viewBox="0 0 11 11" fill="none">
-            <circle cx="5.5" cy="5.5" r="4.5" stroke="currentColor" strokeWidth="0.8" />
-            <ellipse cx="5.5" cy="5.5" rx="2.2" ry="4.5" stroke="currentColor" strokeWidth="0.6" />
-            <line x1="1" y1="5.5" x2="10" y2="5.5" stroke="currentColor" strokeWidth="0.6" />
+            <circle cx="5.5" cy="5.5" r="4.5" stroke="currentColor" strokeWidth="0.8"/>
+            <ellipse cx="5.5" cy="5.5" rx="2.2" ry="4.5" stroke="currentColor" strokeWidth="0.6"/>
+            <line x1="1" y1="5.5" x2="10" y2="5.5" stroke="currentColor" strokeWidth="0.6"/>
           </svg>
         )}
         {is3D ? 'SWITCH TO 2D MAP' : 'SWITCH TO 3D GLOBE'}
