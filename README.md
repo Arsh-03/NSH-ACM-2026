@@ -79,6 +79,7 @@ Project AETHER includes a robust suite of standalone scripts to validate every p
 *   **Comms Check (`test_connectivity.py`):** Ground station Line-of-Sight (LOS) and blackout logic.
 *   **EOL Maneuvers (`test_graveyard_logic.py`):** Fuel-aware orbital decommissioning.
 *   **Constraints Check (`test_constraints.py`):** Cooldown, latency, and Max-DV enforcement.
+*   **Physics Verification (`test_maneuver_physics.py`):** Core validation of Δv impulse, fuel consumption (Tsiolkovsky), and state propagation.
 
 ---
 
@@ -91,6 +92,7 @@ Project AETHER includes a robust suite of standalone scripts to validate every p
 | `POST` | **Telemetry** | `/api/telemetry/bulk` | Ingest entire fleet/debris cloud snapshots |
 | `GET` | **Visuals** | `/api/visualization/snapshot` | Export current LLA state for external renderers |
 | `POST` | **Maneuver** | `/api/maneuver/schedule` | Schedule a future Δv burn sequence |
+| `GET` | **Maneuver** | `/api/maneuver/registry` | List all tracked satellites (ID, R, V, Fuel, Status) |
 | `POST` | **Simulation** | `/api/simulate/step` | Advance the physics engine by `N` seconds |
 
 ---

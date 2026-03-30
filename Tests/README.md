@@ -31,6 +31,10 @@ The primary production-ready telemetry stream generator. It propagates a constel
 **Objective:** Enforces physical and operational mission boundaries.
 - **Workflow:** Verifies that **MAX_DV** is capped at $0.015\text{ km/s}$ → confirms that the **600s Thermal Cooldown** is enforced (429 rejection) → validates the **10s scheduling latency** constraint.
 
+### `test_maneuver_physics.py`
+**Objective:** High-fidelity validation of orbital mechanics and fuel models.
+- **Workflow:** Registers a satellite → executes a manual $\Delta v$ burn → verifies that velocity is updated and fuel is consumed via the Tsiolkovsky equation → propagates time by 60s to ensure coordinates diverge realistically.
+
 ---
 
 ## 🚀 How to Run
