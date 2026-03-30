@@ -165,6 +165,11 @@ function satToRow(sat: LiveSat, debrisList: { id: string; r: number[] }[], at: D
   };
 }
 
+function parseNumericValue(value: string) {
+  const n = Number(String(value).replace(/[^\d.-]/g, ''));
+  return Number.isFinite(n) ? n : NaN;
+}
+
 // ── Live data hook ────────────────────────────────────────────────────────────
 function useLiveData() {
   const [satellites,  setSatellites]  = useState<LiveSat[]>([]);
@@ -247,6 +252,8 @@ export function GlobeView({
   const rafRef      = useRef<number>(0);
   const dragRef     = useRef({ dragging: false, lastX: 0, lastY: 0, velX: 0, velY: 0 });
   const rotRef      = useRef({ x: 0.3, y: 0 });
+  const centerTargetRef = useRef<{ x: number; y: number } | null>(null);
+  const centeredSelectionRef = useRef<string>('');
   const autoSpinRef = useRef(true);
   const satMeshesRef = useRef<Record<string, any>>({});
   const orbitLinesRef = useRef<Record<string, any>>({});
@@ -303,7 +310,7 @@ export function GlobeView({
 
     // GPU-Optimized Debris (Points + BufferGeometry)
     const pointsGeo = new THREE.BufferGeometry();
-    const pointsMat = new THREE.PointsMaterial({ color: 0x8899aa, size: 0.012, sizeAttenuation: true });
+    const pointsMat = new THREE.PointsMaterial({ color: 0xff4d4d, size: 0.014, sizeAttenuation: true });
     const pointsMesh = new THREE.Points(pointsGeo, pointsMat);
     group.add(pointsMesh);
     debrisPointsRef.current = pointsMesh;
@@ -386,17 +393,30 @@ export function GlobeView({
       if (earthRef.current) {
         earthRef.current.rotation.y = gmstRadAt(new Date());
       }
-      // Auto-spin when not dragging
-      if (autoSpinRef.current && !dragRef.current.dragging) {
-        rotRef.current.y += 0.0015;
-      }
-      // Apply inertia
-      if (!dragRef.current.dragging) {
-        dragRef.current.velX *= 0.92;
-        dragRef.current.velY *= 0.92;
-        rotRef.current.x += dragRef.current.velX;
-        rotRef.current.y += dragRef.current.velY;
-        rotRef.current.x = Math.max(-Math.PI/2.2, Math.min(Math.PI/2.2, rotRef.current.x));
+      if (!dragRef.current.dragging && centerTargetRef.current) {
+        const tx = centerTargetRef.current.x;
+        const ty = centerTargetRef.current.y;
+        const dy = ((ty - rotRef.current.y + Math.PI) % (2 * Math.PI)) - Math.PI;
+        rotRef.current.x += (tx - rotRef.current.x) * 0.14;
+        rotRef.current.y += dy * 0.14;
+        dragRef.current.velX *= 0.7;
+        dragRef.current.velY *= 0.7;
+        if (Math.abs(tx - rotRef.current.x) < 0.0015 && Math.abs(dy) < 0.0015) {
+          centerTargetRef.current = null;
+        }
+      } else {
+        // Auto-spin when not dragging
+        if (autoSpinRef.current && !dragRef.current.dragging) {
+          rotRef.current.y += 0.0015;
+        }
+        // Apply inertia
+        if (!dragRef.current.dragging) {
+          dragRef.current.velX *= 0.92;
+          dragRef.current.velY *= 0.92;
+          rotRef.current.x += dragRef.current.velX;
+          rotRef.current.y += dragRef.current.velY;
+          rotRef.current.x = Math.max(-Math.PI/2.2, Math.min(Math.PI/2.2, rotRef.current.x));
+        }
       }
       group.rotation.x = rotRef.current.x;
       group.rotation.y = rotRef.current.y;
@@ -613,6 +633,31 @@ export function GlobeView({
     }
   }, [THREE, satellites, debrisList, selectedId, ready, eciToThree]);
 
+  // Auto-center selected satellite in 3D globe view on selection change.
+  useEffect(() => {
+    if (!THREE || !ready || !selectedId) return;
+    if (centeredSelectionRef.current === selectedId) return;
+
+    const sat = satellites.find((s) => s.id === selectedId);
+    if (!sat?.r || sat.r.length < 3) return;
+
+    const [sx, sy, sz] = eciToThree(sat.r, norm3(sat.r) - 6378.137);
+    // Solve yaw then pitch so the selected satellite moves to camera center (+Z in scene).
+    const targetY = Math.atan2(-sx, sz);
+    const cosY = Math.cos(targetY);
+    const sinY = Math.sin(targetY);
+    const zAfterY = -sinY * sx + cosY * sz;
+    const targetX = Math.atan2(sy, zAfterY);
+
+    centerTargetRef.current = {
+      x: Math.max(-Math.PI / 2.2, Math.min(Math.PI / 2.2, targetX)),
+      y: targetY,
+    };
+    centeredSelectionRef.current = selectedId;
+    dragRef.current.velX = 0;
+    dragRef.current.velY = 0;
+  }, [THREE, ready, selectedId, satellites, eciToThree]);
+
   // Mouse handlers
   const onMouseDown = (e: React.MouseEvent) => {
     dragRef.current.dragging = true;
@@ -696,6 +741,62 @@ export function GlobeView({
           </div>
         );
       })}
+
+      {/* 3D legend */}
+      <div style={{
+        position: 'absolute',
+        right: 12,
+        bottom: 12,
+        zIndex: 5,
+        padding: '8px 10px',
+        borderRadius: 6,
+        border: '1px solid rgba(58,127,255,0.25)',
+        background: 'rgba(5,9,19,0.82)',
+        color: '#a7b8d1',
+        fontSize: 9,
+        fontFamily: 'Azeret Mono, monospace',
+        letterSpacing: 0.5,
+        pointerEvents: 'none',
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 6,
+        minWidth: 138,
+      }}>
+        <div style={{ color: '#7f94b4', fontSize: 8, letterSpacing: 1.1 }}>3D GUIDE</div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
+          <span style={{
+            width: 8,
+            height: 8,
+            borderRadius: '50%',
+            background: '#3a7fff',
+            boxShadow: '0 0 6px rgba(58,127,255,0.9)',
+            flexShrink: 0,
+          }} />
+          <span>Satellite</span>
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
+          <span style={{
+            width: 6,
+            height: 6,
+            borderRadius: '50%',
+            background: '#ff4d4d',
+            boxShadow: '0 0 5px rgba(255,77,77,0.9)',
+            flexShrink: 0,
+          }} />
+          <span>Debris</span>
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
+          <span style={{
+            width: 14,
+            height: 0,
+            borderTop: '2px solid #9747ff',
+            opacity: 0.9,
+            flexShrink: 0,
+          }} />
+          <span>Selected Orbit Path</span>
+        </div>
+      </div>
+
       <div aria-hidden="true" className="absolute border border-[#1f3c5e] inset-0 pointer-events-none rounded-[5px]" />
     </div>
   );
@@ -1026,7 +1127,7 @@ function TelemetryStatsPanelInline({ satellite }: { satellite: Satellite | undef
   display: 'flex',
   flexDirection: 'column',
   padding: '8px 10px 10px 10px',
-  margin: '8px',
+  margin: 0,
   border: '1px solid #1f3c5e',
   borderRadius:'8px',
   background: '#0A1124',
@@ -1073,7 +1174,7 @@ function AlertPanelInline({ satellites }: { satellites: Satellite[] }) {
   height: '100%',
 
   padding: '10px',
-  margin: '8px',
+  margin: 0,
   border: alert ? '1px solid #ff4442' : '1px solid #1f3c5e',
   borderRadius:'8px',
   background: '#0A1124',
@@ -1107,8 +1208,9 @@ function AlertPanelInline({ satellites }: { satellites: Satellite[] }) {
   );
 }
 
-function GroundTrackModule({ liveSats }: { liveSats: LiveSat[] }) {
+function GroundTrackModule({ liveSats, selectedId }: { liveSats: LiveSat[]; selectedId?: string }) {
   const [trails, setTrails] = useState<Record<string, TrackPoint[]>>({});
+  const [projectionMode, setProjectionMode] = useState<'mercator' | 'equirect'>('mercator');
 
   useEffect(() => {
     const now = Date.now();
@@ -1126,18 +1228,47 @@ function GroundTrackModule({ liveSats }: { liveSats: LiveSat[] }) {
 
   const project = (lat: number, lon: number) => {
     const x = ((lon + 180) / 360) * 100;
-    const latRad = Math.max(-85, Math.min(85, lat)) * Math.PI / 180;
-    const mercN = Math.log(Math.tan(Math.PI / 4 + latRad / 2));
-    const y = (1 - (mercN / Math.PI)) * 50;
+    const y = projectionMode === 'equirect'
+      ? ((90 - lat) / 180) * 50
+      : (() => {
+          const latRad = Math.max(-85, Math.min(85, lat)) * Math.PI / 180;
+          const mercN = Math.log(Math.tan(Math.PI / 4 + latRad / 2));
+          return (1 - (mercN / Math.PI)) * 50;
+        })();
     return { x, y };
   };
 
   const utcHour = new Date().getUTCHours() + new Date().getUTCMinutes() / 60;
   const terminatorX = (utcHour / 24) * 100;
+  const atRiskCount = liveSats.filter((s) => s.status === 'AT_RISK' || s.status === 'MANEUVERING').length;
+  const selectedTrailCoverage = selectedId ? Math.min(100, Math.round(((trails[selectedId]?.length || 0) / 220) * 100)) : 0;
+  const projectionLabel = projectionMode === 'mercator' ? 'Mercator' : 'Equirectangular';
 
   return (
-    <div style={{ background: '#081022', border: '1px solid #1f3c5e', borderRadius: 8, padding: '6px 6px 4px 6px', height: '100%', display: 'flex', flexDirection: 'column' }}>
-      <p style={{ color: '#8aa8d8', fontSize: 11, letterSpacing: 1, marginBottom: 4, flexShrink: 0 }}>GROUND TRACK (MERCATOR)</p>
+    <div style={{ background: '#081022', border: '1px solid #1f3c5e', borderRadius: 8, padding: '6px 6px 4px 6px', height: '100%', display: 'flex', flexDirection: 'column', boxSizing: 'border-box' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, marginBottom: 4, flexShrink: 0 }}>
+        <p style={{ color: '#8aa8d8', fontSize: 11, letterSpacing: 1 }}>GROUND TRACK</p>
+        <div style={{ display: 'flex', gap: 8, color: '#8ea3bf', fontSize: 10 }}>
+          <button
+            onClick={() => setProjectionMode((prev) => (prev === 'mercator' ? 'equirect' : 'mercator'))}
+            style={{
+              border: '1px solid #2f4b6b',
+              borderRadius: 4,
+              background: '#0f1e33',
+              color: '#9fc2ea',
+              fontSize: 9,
+              padding: '1px 6px',
+              cursor: 'pointer',
+            }}
+            title="Toggle map projection"
+          >
+            {projectionLabel}
+          </button>
+          <span>Sat: {liveSats.length}</span>
+          <span>Risk: {atRiskCount}</span>
+          {selectedId && <span>Track: {selectedTrailCoverage}%</span>}
+        </div>
+      </div>
       <svg viewBox="0 0 100 50" style={{ width: '100%', flex: 1, minHeight: 0, background: 'linear-gradient(180deg,#09172d,#070b16)' }}>
         <rect x={terminatorX} y="0" width="50" height="50" fill="rgba(3,3,8,0.42)" />
         {[...Array(6)].map((_, i) => (
@@ -1150,6 +1281,7 @@ function GroundTrackModule({ liveSats }: { liveSats: LiveSat[] }) {
         {liveSats.map((s) => {
           const trail = trails[s.id] || [];
           if (!s.r || s.r.length < 3) return null;
+          const isSelected = Boolean(selectedId && s.id === selectedId);
           const cur = eciToLatLonAlt(s.r);
           const curP = project(cur.lat, cur.lon);
 
@@ -1172,9 +1304,10 @@ function GroundTrackModule({ liveSats }: { liveSats: LiveSat[] }) {
 
           return (
             <g key={s.id}>
-              {trailPts.length > 0 && <polyline points={trailPts} fill="none" stroke="rgba(84,161,255,0.55)" strokeWidth="0.35" />}
+              {trailPts.length > 0 && <polyline points={trailPts} fill="none" stroke={isSelected ? 'rgba(128,204,255,0.9)' : 'rgba(84,161,255,0.55)'} strokeWidth={isSelected ? '0.5' : '0.35'} />}
               {pred.length > 1 && <polyline points={pred.join(' ')} fill="none" stroke="rgba(255,185,96,0.75)" strokeDasharray="1 1" strokeWidth="0.35" />}
-              <circle cx={curP.x} cy={curP.y} r="0.7" fill={s.status === 'AT_RISK' || s.status === 'MANEUVERING' ? '#ff5b4d' : '#52a5ff'} />
+              {isSelected && <circle cx={curP.x} cy={curP.y} r="1.35" fill="none" stroke="white" strokeWidth="0.35" />}
+              <circle cx={curP.x} cy={curP.y} r={isSelected ? '0.9' : '0.7'} fill={s.status === 'AT_RISK' || s.status === 'MANEUVERING' ? '#ff5b4d' : '#52a5ff'} />
             </g>
           );
         })}
@@ -1183,27 +1316,62 @@ function GroundTrackModule({ liveSats }: { liveSats: LiveSat[] }) {
   );
 }
 
-function ResourceHeatmapModule({ satellites }: { satellites: Satellite[] }) {
+function ResourceHeatmapModule({ satellites, selectedSatellite }: { satellites: Satellite[]; selectedSatellite?: Satellite }) {
   const risk = satellites.filter((s) => s.status === 'AT_RISK' || s.status === 'MANEUVERING').length;
-  const totalFuelUsed = satellites.reduce((acc, s) => acc + Math.max(0, 50 - Number(s.propellant.replace(' kg', ''))), 0);
-  const collisionsAvoided = risk + Math.max(1, Math.floor(totalFuelUsed / 0.15));
+  const lowFuelCount = satellites.filter((s) => s.fuelPct <= 25).length;
+  const avgFuelPct = satellites.length ? satellites.reduce((acc, s) => acc + s.fuelPct, 0) / satellites.length : 0;
+  const totalFuelUsed = satellites.reduce((acc, s) => {
+    const propellantKg = parseNumericValue(s.propellant);
+    return acc + Math.max(0, 50 - (Number.isFinite(propellantKg) ? propellantKg : 0));
+  }, 0);
+  const closeApproachCount = satellites.filter((s) => {
+    const debrisKm = parseNumericValue(s.debris);
+    return Number.isFinite(debrisKm) && debrisKm <= 500;
+  }).length;
+  const operationalScore = Math.max(0, Math.min(100, 100 - (risk * 12 + lowFuelCount * 5 + closeApproachCount * 3)));
+  const autonomyHours = Math.max(4, Math.round((avgFuelPct / 100) * 72));
+
+  const rankedRisk = useMemo(() => {
+    return satellites
+      .map((s) => {
+        const debrisKm = parseNumericValue(s.debris);
+        const debrisFactor = Number.isFinite(debrisKm) ? Math.max(0, (500 - Math.min(500, debrisKm)) / 5) : 0;
+        const statusFactor = s.status === 'MANEUVERING' ? 25 : s.status === 'AT_RISK' ? 15 : 0;
+        const fuelFactor = Math.max(0, 30 - s.fuelPct * 0.3);
+        const score = Math.max(0, Math.min(100, debrisFactor + statusFactor + fuelFactor));
+        return { id: s.id, debrisKm, score, status: s.status };
+      })
+      .sort((a, b) => b.score - a.score)
+      .slice(0, 6);
+  }, [satellites]);
+
+  const selectedRiskScore = useMemo(() => {
+    if (!selectedSatellite) return null;
+    const match = rankedRisk.find((r) => r.id === selectedSatellite.id);
+    return match?.score ?? null;
+  }, [selectedSatellite, rankedRisk]);
 
   return (
-    <div style={{ background: '#0a1124', border: '1px solid #1f3c5e', borderRadius: 8, height: '100%', overflow: 'hidden', display: 'grid', gridTemplateColumns: '1fr 1fr', gridTemplateRows: '1fr' }}>
+    <div style={{ background: '#0a1124', border: '1px solid #1f3c5e', borderRadius: 8, height: '100%', overflow: 'hidden', display: 'grid', gridTemplateColumns: '1fr 1fr', gridTemplateRows: '1fr', boxSizing: 'border-box' }}>
       <style>{`
         #heatmap-scrollable::-webkit-scrollbar { width: 8px; }
         #heatmap-scrollable::-webkit-scrollbar-track { background: transparent; }
         #heatmap-scrollable::-webkit-scrollbar-thumb { background: #1f3c5e; border-radius: 4px; }
         #heatmap-scrollable::-webkit-scrollbar-thumb:hover { background: #2a5a9f; }
+        #threat-pressure-index::-webkit-scrollbar { width: 8px; }
+        #threat-pressure-index::-webkit-scrollbar-track { background: transparent; }
+        #threat-pressure-index::-webkit-scrollbar-thumb { background: #1f3c5e; border-radius: 4px; }
+        #threat-pressure-index::-webkit-scrollbar-thumb:hover { background: #2a5a9f; }
       `}</style>
 
       {/* Left: heading + scrollable fuel bars */}
       <div style={{ gridColumn: 1, display: 'flex', flexDirection: 'column', borderRight: '1px solid #1a2a42', overflow: 'hidden' }}>
-        <div style={{ padding: '8px 12px', borderBottom: '1px solid #1a2a42', flexShrink: 0 }}>
+        <div style={{ padding: '8px 12px', borderBottom: '1px solid #1a2a42', flexShrink: 0, display: 'flex', justifyContent: 'space-between', gap: 8 }}>
           <p style={{ color: '#8aa8d8', fontSize: 11, letterSpacing: 1, margin: 0 }}>TELEMETRY & RESOURCE HEATMAP</p>
+          <p style={{ color: '#89e0ff', fontSize: 10, margin: 0 }}>Score {operationalScore.toFixed(0)}/100</p>
         </div>
         <div id="heatmap-scrollable" style={{ overflowY: 'auto', padding: '8px 8px 8px 12px', flex: 1, scrollbarWidth: 'thin', scrollbarColor: '#1f3c5e transparent' }}>
-          {satellites.slice(0, 14).map((s) => {
+          {satellites.slice().sort((a, b) => a.fuelPct - b.fuelPct).slice(0, 16).map((s) => {
             const pct = Math.max(0, Math.min(100, s.fuelPct));
             const color = pct > 50 ? '#00d084' : pct > 20 ? '#ffad33' : '#ff5b4d';
             return (
@@ -1220,30 +1388,39 @@ function ResourceHeatmapModule({ satellites }: { satellites: Satellite[] }) {
         </div>
       </div>
 
-      {/* Right: graph fills full height, no heading */}
-      <div style={{ gridColumn: 2, background: '#0e1a2f', padding: 2, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
-        <p style={{ margin: '0', color: '#9cb0cc', fontSize: 10, flexShrink: 0 }}>Fuel Consumed vs Collisions Avoided</p>
-        <svg viewBox="0 0 180 140" style={{ width: '100%', flex: 1, height: '100%' }}>
-           <g transform="scale(1.2)">
-          <line x1="18" y1="90" x2="126" y2="90" stroke="#324968" strokeWidth="1" />
-          <line x1="18" y1="10" x2="18" y2="90" stroke="#324968" strokeWidth="1" />
-          {[0.25, 0.5, 0.75, 1].map((k, i) => (
-            <line key={i} x1={18 + k * 108} y1="10" x2={18 + k * 108} y2="90" stroke="rgba(140,165,196,0.2)" strokeWidth="0.6" />
+      {/* Right: risk pressure + fleet KPIs */}
+      <div style={{ gridColumn: 2, background: '#0e1a2f', padding: '8px 10px', display: 'flex', flexDirection: 'column', minHeight: 0, gap: 8 }}>
+        <p style={{ margin: 0, color: '#9cb0cc', fontSize: 10, flexShrink: 0 }}>THREAT PRESSURE INDEX</p>
+        <div id="threat-pressure-index" style={{ display: 'grid', gap: 6, overflowY: 'auto', minHeight: 0, paddingRight: 2, scrollbarWidth: 'thin', scrollbarColor: '#1f3c5e transparent' }}>
+          {rankedRisk.map((item) => (
+            <div key={item.id} style={{ background: 'rgba(11,23,39,0.9)', border: '1px solid #203550', borderRadius: 6, padding: '5px 7px' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 10, color: '#a7bdd8', marginBottom: 4 }}>
+                <span style={{ color: selectedSatellite?.id === item.id ? '#8dd8ff' : '#d2e1f4' }}>{item.id}</span>
+                <span>{item.score.toFixed(0)}%</span>
+              </div>
+              <div style={{ height: 5, borderRadius: 4, background: '#152238', overflow: 'hidden' }}>
+                <div style={{ width: `${item.score}%`, height: '100%', borderRadius: 4, background: item.score >= 70 ? '#ff5b4d' : item.score >= 40 ? '#ffad33' : '#4bb5ff' }} />
+              </div>
+            </div>
           ))}
-          {[0.25, 0.5, 0.75, 1].map((k, i) => (
-            <line key={`h-${i}`} x1="18" y1={90 - k * 80} x2="126" y2={90 - k * 80} stroke="rgba(140,165,196,0.2)" strokeWidth="0.6" />
-          ))}
-          <circle cx={18 + Math.min(108, totalFuelUsed * 2)} cy={90 - Math.min(80, collisionsAvoided * 3)} r="3" fill="#58a6ff" />
-          <text x="20" y="102" fill="#8ea3bf" fontSize="8">Fuel Used</text>
-          <text x="2" y="14" fill="#8ea3bf" fontSize="8">Avoided</text>
-          </g>
-        </svg>
+        </div>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6, marginTop: 'auto', fontSize: 10 }}>
+          <div style={{ background: '#11223a', borderRadius: 6, padding: '6px 7px', color: '#9cb0cc' }}>Avg Fuel: <span style={{ color: 'white' }}>{avgFuelPct.toFixed(1)}%</span></div>
+          <div style={{ background: '#11223a', borderRadius: 6, padding: '6px 7px', color: '#9cb0cc' }}>Autonomy: <span style={{ color: 'white' }}>{autonomyHours}h</span></div>
+          <div style={{ background: '#11223a', borderRadius: 6, padding: '6px 7px', color: '#9cb0cc' }}>Fuel Used: <span style={{ color: 'white' }}>{totalFuelUsed.toFixed(1)}kg</span></div>
+          <div style={{ background: '#11223a', borderRadius: 6, padding: '6px 7px', color: '#9cb0cc' }}>Close Passes: <span style={{ color: 'white' }}>{closeApproachCount}</span></div>
+        </div>
+        {selectedSatellite && selectedRiskScore !== null && (
+          <p style={{ margin: 0, fontSize: 10, color: '#89e0ff' }}>
+            Selected {selectedSatellite.id} pressure score: {selectedRiskScore.toFixed(0)}%
+          </p>
+        )}
       </div>
     </div>
   );
 }
 
-function ManeuverTimelineModule() {
+function ManeuverTimelineModule({ selectedId, satellites }: { selectedId?: string; satellites: Satellite[] }) {
   const [pending, setPending] = useState<any[]>([]);
   const [executed, setExecuted] = useState<any[]>([]);
 
@@ -1264,35 +1441,114 @@ function ManeuverTimelineModule() {
     return () => { stop = true; clearInterval(i); };
   }, []);
 
-  const all = [...executed, ...pending].slice(-20);
+  const synthesizedFromStatus = useMemo(() => {
+    const nowTs = Date.now() / 1000;
+    return satellites
+      .filter((s) => s.status === 'MANEUVERING' || s.status === 'AT_RISK' || s.status === 'POST_BURN')
+      .map((s, idx) => ({
+        satellite_id: s.id,
+        burn_id: `LIVE-${idx + 1}`,
+        burn_start: nowTs - 90,
+        burn_end: nowTs + 30,
+        cooldown_end: nowTs + 600,
+        status: s.status === 'MANEUVERING' ? 'EXECUTED' : 'PENDING',
+        synthetic: true,
+      }));
+  }, [satellites]);
+
+  const sourceItems = (executed.length + pending.length) > 0
+    ? [...executed, ...pending]
+    : synthesizedFromStatus;
+
+  const all = sourceItems
+    .sort((a, b) => Number(a.burn_start ?? a.burn_time ?? 0) - Number(b.burn_start ?? b.burn_time ?? 0))
+    .slice(-28);
   const now = Date.now() / 1000;
-  const tMin = Math.min(now - 1800, ...all.map((m) => Number(m.burn_time || m.burn_start || now)));
-  const tMax = Math.max(now + 3600, ...all.map((m) => Number(m.cooldown_end || m.burn_time || now)));
+  const pendingCount = pending.length || synthesizedFromStatus.filter((m) => m.status === 'PENDING').length;
+  const executedCount = executed.length || synthesizedFromStatus.filter((m) => m.status === 'EXECUTED').length;
+  const nextSelectedBurn = selectedId
+    ? all.find((m) => (m.satellite_id || '') === selectedId && Number(m.burn_start ?? m.burn_time ?? 0) >= now)
+    : null;
+  const nextGlobalBurn = all.find((m) => Number(m.burn_start ?? m.burn_time ?? 0) >= now);
+
+  const etaLabel = (event: any | null) => {
+    if (!event) return 'none';
+    const t = Number(event.burn_start ?? event.burn_time ?? now);
+    const delta = Math.round(t - now);
+    if (delta <= 0) return 'now';
+    const m = Math.floor(delta / 60);
+    const s = delta % 60;
+    return `${m}m ${s}s`;
+  };
+
+  const formatUtc = (sec: number) => {
+    const d = new Date(sec * 1000);
+    const hh = String(d.getUTCHours()).padStart(2, '0');
+    const mm = String(d.getUTCMinutes()).padStart(2, '0');
+    return `${hh}:${mm} UTC`;
+  };
+
+  const eventStarts = all.map((m) => Number(m.burn_time || m.burn_start || now));
+  const eventEnds = all.map((m) => Number(m.cooldown_end || m.burn_end || m.burn_time || now));
+  const rawMin = eventStarts.length ? Math.min(...eventStarts) : now;
+  const rawMax = eventEnds.length ? Math.max(...eventEnds) : now + 3600;
+  const dynamicPad = Math.max(900, (rawMax - rawMin) * 0.18);
+  const tMin = Math.min(now - 1200, rawMin - dynamicPad);
+  const tMax = Math.max(now + 1800, rawMax + dynamicPad);
   const span = Math.max(1, tMax - tMin);
 
-  const xAt = (t: number) => 8 + ((t - tMin) / span) * 84;
+  const xAt = (t: number) => 2 + ((t - tMin) / span) * 96;
+  const tickTimes = [0, 0.25, 0.5, 0.75, 1].map((p) => tMin + span * p);
 
   return (
-    <div style={{ background: '#0a1124', border: '1px solid #1f3c5e', borderRadius: 8, padding: 12, height: '100%', overflow: 'hidden' }}>
-      <p style={{ color: '#8aa8d8', fontSize: 11, letterSpacing: 1, marginBottom: 8 }}>MANEUVER TIMELINE (GANTT)</p>
-      <div style={{ height: 'calc(100% - 24px)', overflowY: 'auto', paddingRight: 4 }}>
+    <div style={{ background: '#0a1124', border: '1px solid #1f3c5e', borderRadius: 8, padding: 12, height: '100%', overflow: 'hidden', display: 'flex', flexDirection: 'column', boxSizing: 'border-box' }}>
+      <style>{`
+        #maneuver-timeline-scroll::-webkit-scrollbar { width: 8px; }
+        #maneuver-timeline-scroll::-webkit-scrollbar-track { background: transparent; }
+        #maneuver-timeline-scroll::-webkit-scrollbar-thumb { background: #1f3c5e; border-radius: 4px; }
+        #maneuver-timeline-scroll::-webkit-scrollbar-thumb:hover { background: #2a5a9f; }
+      `}</style>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+        <p style={{ color: '#8aa8d8', fontSize: 11, letterSpacing: 1 }}>MANEUVER TIMELINE</p>
+        <p style={{ color: '#9cb0cc', fontSize: 10 }}>Pending {pendingCount} | Executed {executedCount}</p>
+      </div>
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6, marginBottom: 8, fontSize: 10 }}>
+        <div style={{ background: '#11223a', borderRadius: 6, padding: '5px 7px', color: '#9cb0cc' }}>
+          Next Fleet Burn: <span style={{ color: 'white' }}>{etaLabel(nextGlobalBurn)}</span>
+        </div>
+        <div style={{ background: '#11223a', borderRadius: 6, padding: '5px 7px', color: '#9cb0cc' }}>
+          Selected ETA: <span style={{ color: 'white' }}>{etaLabel(nextSelectedBurn)}</span>
+        </div>
+      </div>
+      <div id="maneuver-timeline-scroll" style={{ height: 'calc(100% - 56px)', overflowY: 'auto', paddingRight: 4, scrollbarWidth: 'thin', scrollbarColor: '#1f3c5e transparent' }}>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', color: '#6f87a8', fontSize: 9, marginBottom: 6 }}>
+          {tickTimes.map((t, idx) => (
+            <span key={idx} style={{ textAlign: idx === 0 ? 'left' : idx === 4 ? 'right' : 'center' }}>{formatUtc(t)}</span>
+          ))}
+        </div>
         {all.length === 0 ? (
           <p style={{ color: '#5f7291', fontSize: 11 }}>No maneuvers scheduled/executed yet.</p>
         ) : all.map((m, idx) => {
           const sat = m.satellite_id || 'SAT';
+          const isSelectedSat = Boolean(selectedId && sat === selectedId);
           const bStart = Number(m.burn_start ?? m.burn_time ?? now);
           const bEnd = Number(m.burn_end ?? bStart);
           const cdEnd = Number(m.cooldown_end ?? (bEnd + 600));
-          const burnLeft = xAt(bStart);
-          const burnW = Math.max(0.8, xAt(bEnd) - burnLeft + 0.8);
-          const cdLeft = xAt(bEnd);
-          const cdW = Math.max(1.2, xAt(cdEnd) - cdLeft);
+          const burnLeft = Math.max(0, Math.min(100, xAt(bStart)));
+          const burnW = Math.max(0.8, Math.min(100 - burnLeft, xAt(bEnd) - burnLeft + 0.8));
+          const cdLeft = Math.max(0, Math.min(100, xAt(bEnd)));
+          const cdW = Math.max(1.2, Math.min(100 - cdLeft, xAt(cdEnd) - cdLeft));
+          const statusLabel = m.status || (m.created_at ? 'PENDING' : 'EXECUTED');
+          const statusColor = statusLabel === 'EXECUTED' ? '#7bd88f' : statusLabel === 'PENDING' ? '#ffad33' : '#58a6ff';
           return (
-            <div key={`${sat}-${idx}`} style={{ marginBottom: 8 }}>
+            <div key={`${sat}-${idx}`} style={{ marginBottom: 8, padding: '4px 5px', borderRadius: 6, border: isSelectedSat ? '1px solid #2f5f91' : '1px solid transparent', background: isSelectedSat ? 'rgba(22,49,78,0.3)' : 'transparent' }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', color: '#96abc9', fontSize: 10 }}>
                 <span>{sat} · {m.burn_id || 'BURN'}</span>
-                <span>{m.status || (m.created_at ? 'PENDING' : 'EXECUTED')}</span>
+                <span style={{ color: statusColor }}>{statusLabel}</span>
               </div>
+              {m.synthetic && (
+                <p style={{ color: '#6f87a8', fontSize: 9, marginTop: 2 }}>Live fallback from satellite status</p>
+              )}
               <div style={{ position: 'relative', height: 10, background: '#152238', borderRadius: 5, marginTop: 3 }}>
                 <div style={{ position: 'absolute', left: `${burnLeft}%`, width: `${burnW}%`, height: '100%', background: '#58a6ff', borderRadius: 5 }} />
                 <div style={{ position: 'absolute', left: `${cdLeft}%`, width: `${cdW}%`, height: '100%', background: 'rgba(255,183,77,0.45)', borderRadius: 5 }} />
@@ -1309,6 +1565,7 @@ function ManeuverTimelineModule() {
 export default function EnhancedDashboard() {
   const { satellites: liveSats, debrisList, counts, connected, istTime } = useLiveData();
   const [selectedId,  setSelectedId]  = useState<string>('');
+  const MAP_DEBRIS_RANGE_KM = 500;
 
   // Optimization: Prune 10k items to candidates once per selection/WS update
   const candidateRadarPool = useMemo(() => {
@@ -1322,8 +1579,22 @@ export default function EnhancedDashboard() {
     });
   }, [debrisList, selectedId, liveSats]);
 
+  const mapDebrisList = useMemo(() => {
+    const sel = liveSats.find(s => s.id === selectedId);
+    if (!sel || !debrisList.length) return [];
+    const maxDistSq = MAP_DEBRIS_RANGE_KM * MAP_DEBRIS_RANGE_KM;
+    return debrisList.filter((deb) => {
+      const dx = deb.r[0] - sel.r[0];
+      const dy = deb.r[1] - sel.r[1];
+      const dz = deb.r[2] - sel.r[2];
+      return (dx * dx + dy * dy + dz * dz) <= maxDistSq;
+    });
+  }, [debrisList, selectedId, liveSats]);
+
   const [openTabIds, setOpenTabIds] = useState<string[]>([]);
   const [showAddModal, setShowAddModal] = useState(false);
+  const [addSatQuery, setAddSatQuery] = useState('');
+  const addSatInputRef = useRef<HTMLInputElement | null>(null);
   const [viewport, setViewport] = useState({
     width: typeof window !== 'undefined' ? window.innerWidth : 1920,
     height: typeof window !== 'undefined' ? window.innerHeight : 1080,
@@ -1339,12 +1610,9 @@ export default function EnhancedDashboard() {
 
   const compactLayout = viewport.height <= 820 || viewport.width <= 1450;
   const rightColWidth = viewport.width <= 1650 ? '40%' : '38%';
-  // const rootRows = compactLayout
-  //   ? '48px minmax(0, 2.45fr) minmax(0, 0.75fr) minmax(0, 0.45fr) minmax(0, 1.9fr)'
-  //   : '48px minmax(0, 2.3fr) minmax(0, 0.7fr) minmax(0, 0.4fr) minmax(0, 2.0fr)';
   const rootRows = compactLayout
-  ? '48px minmax(0, 2.6fr) minmax(0, 0.8fr) minmax(0, 0.5fr) minmax(0, 1.2fr)'
-  : '48px minmax(0, 2.5fr) minmax(0, 0.75fr) minmax(0, 0.45fr) minmax(0, 1.3fr)';
+  ? '48px minmax(0, 2.3fr) minmax(0, 1.35fr) minmax(0, 1.15fr)'
+  : '48px minmax(0, 2.2fr) minmax(0, 1.45fr) minmax(0, 1.2fr)';
 
   const now = new Date();
   const tableRows = liveSats.map((sat) => satToRow(sat, debrisList, now));
@@ -1359,12 +1627,56 @@ export default function EnhancedDashboard() {
     }
   }, [tableRows.length]);
 
+  // Keep only tabs that still exist in the latest live dataset.
+  useEffect(() => {
+    setOpenTabIds((prev) => {
+      const valid = prev.filter((id) => tableRows.some((s) => s.id === id));
+      return valid.length === prev.length ? prev : valid;
+    });
+  }, [tableRows]);
+
+  // If selection comes from map/radar/table, ensure the tab bar reflects it.
+  useEffect(() => {
+    if (!selectedId) return;
+    if (!tableRows.some((s) => s.id === selectedId)) return;
+    setOpenTabIds((prev) => (prev.includes(selectedId) ? prev : [...prev, selectedId]));
+  }, [selectedId, tableRows]);
+
   const activeTabs = openTabIds
     .map(id => tableRows.find(s => s.id === id))
     .filter(Boolean)
     .map(s => ({ id: s!.id, name: s!.name }));
 
-  const handleSelectTab = (id: string) => setSelectedId(id);
+  const availableSatellites = useMemo(() => {
+    const q = addSatQuery.trim().toLowerCase();
+    const closedTabs = tableRows.filter((s) => !openTabIds.includes(s.id));
+    if (!q) return closedTabs;
+
+    const idOrNameMatches = closedTabs.filter((s) =>
+      s.id.toLowerCase().includes(q) || s.name.toLowerCase().includes(q)
+    );
+    if (idOrNameMatches.length > 0) return idOrNameMatches;
+
+    // Fallback: allow altitude search only when no ID/name matches exist.
+    return closedTabs.filter((s) => s.altitude.toLowerCase().includes(q));
+  }, [tableRows, openTabIds, addSatQuery]);
+
+  const matchedOpenSatellites = useMemo(() => {
+    const q = addSatQuery.trim().toLowerCase();
+    if (!q) return [];
+    const openTabs = tableRows.filter((s) => openTabIds.includes(s.id));
+    return openTabs.filter((s) =>
+      s.id.toLowerCase().includes(q) ||
+      s.name.toLowerCase().includes(q)
+    );
+  }, [tableRows, openTabIds, addSatQuery]);
+
+  const handleSelectTab = (id: string) => {
+    if (!openTabIds.includes(id)) {
+      setOpenTabIds((prev) => [...prev, id]);
+    }
+    setSelectedId(id);
+  };
 
   const handleCloseTab = (id: string) => {
     const remaining = openTabIds.filter(t => t !== id);
@@ -1375,8 +1687,24 @@ export default function EnhancedDashboard() {
   const handleAddSatellite = (id: string) => {
     if (!openTabIds.includes(id)) setOpenTabIds(prev => [...prev, id]);
     setSelectedId(id);
+    setAddSatQuery('');
     setShowAddModal(false);
   };
+
+  const handleOpenExistingSatellite = (id: string) => {
+    setSelectedId(id);
+    setAddSatQuery('');
+    setShowAddModal(false);
+  };
+
+  useEffect(() => {
+    if (!showAddModal) return;
+    const raf = requestAnimationFrame(() => {
+      addSatInputRef.current?.focus();
+      addSatInputRef.current?.select();
+    });
+    return () => cancelAnimationFrame(raf);
+  }, [showAddModal]);
 
   return (
     <Tooltip.Provider>
@@ -1425,7 +1753,10 @@ export default function EnhancedDashboard() {
               activeSatelliteId={selectedId}
               onSelectSatellite={handleSelectTab}
               onCloseSatellite={handleCloseTab}
-              onAddSatellite={() => setShowAddModal(true)}
+              onAddSatellite={() => {
+                setAddSatQuery('');
+                setShowAddModal(true);
+              }}
             />
           </div>
 
@@ -1475,57 +1806,50 @@ export default function EnhancedDashboard() {
           minHeight: 0,
           borderRight: '1px solid #1a1a2e',
         }}>
-          <MapViewPanel satellites={tableRows} debrisList={debrisList} selectedId={selectedId} onSelect={setSelectedId} />
+          <MapViewPanel satellites={tableRows} debrisList={mapDebrisList} selectedId={selectedId} onSelect={setSelectedId} debrisFilterKm={MAP_DEBRIS_RANGE_KM} />
         </div>
 
-        {/* ══ RIGHT COLUMN: spans ROW 2 + ROW 3 + ROW 4 ══ */}
+        {/* ══ RIGHT COLUMN: radar + telemetry + compliance modules ══ */}
         <div style={{
           gridRow: '2 / 5',
           gridColumn: 2,
           display: 'grid',
-          gridTemplateRows: 'minmax(0, 2fr) minmax(0, 1fr)',
+          gridTemplateRows: compactLayout
+            ? 'minmax(0, 1.35fr) minmax(0, 1fr) minmax(0, 1.65fr) minmax(0, 0.7fr)'
+            : 'minmax(0, 1.3fr) minmax(0, 1fr) minmax(0, 1.7fr) minmax(0, 0.75fr)',
           overflow: 'hidden',
           minHeight: 0,
           background: '#07070f',
           borderLeft: '1px solid #1a1a2e',
-          gap: 0,
+          gap: 8,
+          padding: 8,
+          boxSizing: 'border-box',
         }}>
           {/* Bullseye Radar — full width top */}
-          <div style={{ overflow: 'hidden', borderBottom: '1px solid #1a1a2e', minHeight: 0 }}>
+          <div style={{ overflow: 'hidden', border: '1px solid #1a1a2e', minHeight: 0, borderRadius: 8 }}>
             <ExpandableBullseye satellite={selectedSat} debrisList={debrisList} />
           </div>
           {/* Telemetry + Alerts side by side — bottom */}
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', minHeight: 0, overflow: 'hidden' }}>
-            <div style={{ overflow: 'hidden', borderRight: '1px solid #1a1a2e', minHeight: 0 }}>
+          <div style={{ display: 'grid', gridTemplateColumns: compactLayout ? '1fr' : '1fr 1fr', minHeight: 0, overflow: 'hidden', gap: 8 }}>
+            <div style={{ overflow: 'hidden', minHeight: 0, border: '1px solid #1a1a2e', borderRadius: 8 }}>
               <TelemetryStatsPanelInline satellite={selectedSat} />
             </div>
-            <div style={{ overflow: 'hidden', minHeight: 0 }}>
+            <div style={{ overflow: 'hidden', minHeight: 0, border: '1px solid #1a1a2e', borderRadius: 8 }}>
               <AlertPanelInline satellites={tableRows} />
             </div>
           </div>
-        </div>
-
-        {/* ══ ROW 5: REQUIRED MODULES COMPLIANCE STRIP ══ */}
-        <div style={{
-          gridRow: 5,
-          gridColumn: '1 / 3',
-          display: 'grid',
-          gridTemplateColumns: '1fr 1fr 1fr',
-          gap: 8,
-          padding: 8,
-          borderTop: '1px solid #1e1e30',
-          background: '#050913',
-          overflow: 'hidden',
-          minHeight: 0,
-        }}>
-          <div style={{ minHeight: 0, overflow: 'hidden' }}>
-            <GroundTrackModule liveSats={liveSats} />
+          {/* Ground Track and Heatmap side by side */}
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, minHeight: 0, overflow: 'hidden' }}>
+            <div style={{ minHeight: 0, overflow: 'hidden' }}>
+              <GroundTrackModule liveSats={liveSats} selectedId={selectedId} />
+            </div>
+            <div style={{ minHeight: 0, overflow: 'hidden' }}>
+              <ResourceHeatmapModule satellites={tableRows} selectedSatellite={selectedSat} />
+            </div>
           </div>
-          <div style={{ minHeight: 0, overflow: 'hidden' }}>
-            <ResourceHeatmapModule satellites={tableRows} />
-          </div>
-          <div style={{ minHeight: 0, overflow: 'hidden' }}>
-            <ManeuverTimelineModule />
+          {/* Maneuver Timeline — bottom right */}
+          <div style={{ minHeight: 0, overflow: 'hidden', border: '1px solid #1a1a2e', borderRadius: 8 }}>
+            <ManeuverTimelineModule selectedId={selectedId} satellites={tableRows} />
           </div>
         </div>
 
@@ -1540,6 +1864,12 @@ export default function EnhancedDashboard() {
           minHeight: 0,
           background: '#05050e',
         }}>
+          <style>{`
+            #satellite-table-rows::-webkit-scrollbar { width: 8px; }
+            #satellite-table-rows::-webkit-scrollbar-track { background: transparent; }
+            #satellite-table-rows::-webkit-scrollbar-thumb { background: #1f3c5e; border-radius: 4px; }
+            #satellite-table-rows::-webkit-scrollbar-thumb:hover { background: #2a5a9f; }
+          `}</style>
           {/* Section label */}
           <div style={{ display: 'flex', alignItems: 'center', padding: '0 16px', borderBottom: '1px solid #151522' }}>
             <p style={{ color: '#555', fontSize: 10, fontFamily: 'Azeret Mono, monospace', letterSpacing: 2 }}>SATELLITES</p>
@@ -1559,7 +1889,7 @@ export default function EnhancedDashboard() {
           </div>
 
           {/* Table rows */}
-          <div style={{ overflowY: 'auto', scrollbarWidth: 'thin', scrollbarColor: '#1f3c5e transparent', minHeight: 0 }}>
+          <div id="satellite-table-rows" style={{ overflowY: 'auto', scrollbarWidth: 'thin', scrollbarColor: '#1f3c5e transparent', minHeight: 0 }}>
             {tableRows.length === 0 ? (
               <p style={{ color: '#2a2a3a', fontSize: 11, padding: '6px 16px' }}>Waiting for telemetry from backend...</p>
             ) : (
@@ -1572,12 +1902,12 @@ export default function EnhancedDashboard() {
                       display: 'grid',
                       gridTemplateColumns: '2fr 0.5fr 0.5fr 1fr 1fr 1fr 1fr 1fr 0.6fr',
                       alignItems: 'center',
-                      padding: '3px 16px',
+                      padding: '2px 16px',
                       cursor: 'pointer',
                       background: isSelected ? 'rgba(58,127,255,0.09)' : 'transparent',
                       borderLeft: isSelected ? '2px solid #3a7fff' : '2px solid transparent',
                       color: isAtRisk ? '#ff9944' : '#e0e0e0',
-                      fontSize: 11,
+                      fontSize: 10.5,
                     }}
                     onClick={() => setSelectedId(sat.id)}
                     whileHover={{ backgroundColor: 'rgba(255,255,255,0.03)' }}>
@@ -1608,14 +1938,66 @@ export default function EnhancedDashboard() {
       {/* ── Add Satellite Modal ── */}
       {showAddModal && (
         <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.7)', zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center' }}
-          onClick={() => setShowAddModal(false)}>
-          <div style={{ background: '#0a0d1a', border: '1px solid #1f3c5e', borderRadius: 10, padding: '20px 24px', minWidth: 300, maxHeight: 400, overflowY: 'auto' }}
+          onClick={() => {
+            setAddSatQuery('');
+            setShowAddModal(false);
+          }}>
+          <div id="add-satellite-list" style={{ background: '#0a0d1a', border: '1px solid #1f3c5e', borderRadius: 10, padding: '20px 24px', minWidth: 320, maxHeight: 430, overflowY: 'auto', scrollbarWidth: 'thin', scrollbarColor: '#1f3c5e transparent' }}
             onClick={e => e.stopPropagation()}>
+            <style>{`
+              #add-satellite-list::-webkit-scrollbar { width: 6px; }
+              #add-satellite-list::-webkit-scrollbar-track { background: transparent; }
+              #add-satellite-list::-webkit-scrollbar-thumb { background: #1f3c5e; border-radius: 4px; }
+              #add-satellite-list::-webkit-scrollbar-thumb:hover { background: #2a5a9f; }
+            `}</style>
             <p style={{ color: 'white', fontSize: 13, fontWeight: 600, marginBottom: 14, letterSpacing: 1 }}>SELECT SATELLITE</p>
-            {tableRows.filter(s => !openTabIds.includes(s.id)).length === 0 ? (
-              <p style={{ color: '#8892a4', fontSize: 11 }}>All satellites already open.</p>
+            <input
+              ref={addSatInputRef}
+              type="text"
+              value={addSatQuery}
+              onChange={(e) => setAddSatQuery(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && availableSatellites.length > 0) {
+                  e.preventDefault();
+                  handleAddSatellite(availableSatellites[0].id);
+                } else if (e.key === 'Enter' && matchedOpenSatellites.length > 0) {
+                  e.preventDefault();
+                  handleOpenExistingSatellite(matchedOpenSatellites[0].id);
+                }
+              }}
+              placeholder="Search satellite ID / name / altitude"
+              style={{
+                width: '100%',
+                marginBottom: 12,
+                padding: '8px 10px',
+                borderRadius: 6,
+                border: '1px solid #1f3c5e',
+                background: '#0e1a2e',
+                color: 'white',
+                fontSize: 12,
+                outline: 'none',
+              }}
+            />
+            {availableSatellites.length === 0 ? (
+              matchedOpenSatellites.length > 0 ? (
+                <div>
+                  <p style={{ color: '#8892a4', fontSize: 11, marginBottom: 8 }}>
+                    Satellite already open. Press Enter to switch tab.
+                  </p>
+                  {matchedOpenSatellites.map((s) => (
+                    <div key={s.id}
+                      onClick={() => handleOpenExistingSatellite(s.id)}
+                      style={{ padding: '8px 12px', borderRadius: 6, cursor: 'pointer', marginBottom: 4, background: '#0e1a2e', border: '1px solid #3a7fff', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                      <p style={{ color: 'white', fontSize: 12 }}>{s.name}</p>
+                      <p style={{ color: '#3a7fff', fontSize: 10 }}>Open tab</p>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <p style={{ color: '#8892a4', fontSize: 11 }}>All satellites already open.</p>
+              )
             ) : (
-              tableRows.filter(s => !openTabIds.includes(s.id)).map(s => (
+              availableSatellites.map(s => (
                 <div key={s.id}
                   onClick={() => handleAddSatellite(s.id)}
                   style={{ padding: '8px 12px', borderRadius: 6, cursor: 'pointer', marginBottom: 4, background: '#0e1a2e', border: '1px solid #1f3c5e', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}

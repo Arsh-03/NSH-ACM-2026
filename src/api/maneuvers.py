@@ -49,6 +49,27 @@ class ManeuverRequest(BaseModel):
     dv_y:         float = Field(...)
     dv_z:         float = Field(...)
     burn_time:    Optional[float] = None
+    burn_id:      Optional[str] = None
+
+
+def _record_executed_maneuver(
+    satellite_id: str,
+    burn_time: float,
+    dv_vector: list[float],
+    burn_id: Optional[str] = None,
+):
+    dv_mag = float(np.linalg.norm(np.array(dv_vector, dtype=float)))
+    safe_burn_id = burn_id or f"AUTO-{int(burn_time)}"
+    executed_maneuvers.append({
+        "satellite_id": satellite_id,
+        "burn_id": safe_burn_id,
+        "burn_start": burn_time,
+        "burn_end": burn_time,
+        "cooldown_end": burn_time + THERMAL_COOLDOWN,
+        "dv_vector": [float(dv_vector[0]), float(dv_vector[1]), float(dv_vector[2])],
+        "dv_magnitude": dv_mag,
+        "status": "EXECUTED",
+    })
 
 
 class DeltaVVector(BaseModel):
@@ -134,11 +155,20 @@ async def execute_burn(req: ManeuverRequest):
             detail=f"Insufficient fuel. Have {current_fuel:.2f}kg, "
                    f"need {fuel_spent:.2f}kg.")
 
+    burn_ts = float(req.burn_time) if req.burn_time is not None else current_time
+
     velocity = np.array(sat_data["v"]) + dv_vector
     sat_data["v"]         = [float(x) for x in velocity]
     sat_data["fuel_mass"] = float(round(current_fuel - fuel_spent, 4))
     sat_data["status"]    = "POST_BURN"
     maneuver_history[sat_key] = current_time
+
+    _record_executed_maneuver(
+        satellite_id=sat_key,
+        burn_time=burn_ts,
+        dv_vector=[float(dv_vector[0]), float(dv_vector[1]), float(dv_vector[2])],
+        burn_id=req.burn_id,
+    )
 
     # Persistence update
     db.upsert_satellite(sat_key, sat_data)
@@ -161,19 +191,9 @@ async def execute_scheduled_burn(satellite_id: str, dv_vector: list[float], burn
         dv_y=float(dv_vector[1]),
         dv_z=float(dv_vector[2]),
         burn_time=burn_time,
+        burn_id=burn_id,
     )
     result = await execute_burn(req)
-
-    executed_maneuvers.append({
-        "satellite_id": satellite_id,
-        "burn_id": burn_id,
-        "burn_start": burn_time,
-        "burn_end": burn_time,
-        "cooldown_end": burn_time + THERMAL_COOLDOWN,
-        "dv_vector": [float(dv_vector[0]), float(dv_vector[1]), float(dv_vector[2])],
-        "dv_magnitude": float(np.linalg.norm(np.array(dv_vector, dtype=float))),
-        "status": "EXECUTED",
-    })
     return result
 
 

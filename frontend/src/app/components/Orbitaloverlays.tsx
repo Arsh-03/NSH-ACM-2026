@@ -262,7 +262,10 @@ export const PredictedPath = memo(function PredictedPath({
 // 3. TERMINATOR OVERLAY — unchanged
 // ══════════════════════════════════════════════════════════════════════════════
 
-interface TerminatorOverlayProps { containerRef: RefObject<HTMLDivElement | null>; }
+interface TerminatorOverlayProps {
+  containerRef: RefObject<HTMLDivElement | null>;
+  showDebug?: boolean;
+}
 
 function computeSubsolarPoint(date: Date) {
   const jd = date.getTime() / 86_400_000 + 2_440_587.5, n = jd - 2_451_545.0;
@@ -276,68 +279,184 @@ function computeSubsolarPoint(date: Date) {
   return { lat: dec, lon: ((ra - gst + 180) % 360 + 360) % 360 - 180 };
 }
 
-function terminatorLons(latDeg: number, subLon: number, declDeg: number) {
-  const phi = latDeg * (Math.PI / 180), delt = declDeg * (Math.PI / 180);
-  const arg = -Math.tan(phi) * Math.tan(delt);
-  if (arg < -1) return null;
-  if (arg >  1) return { dawn: -180, dusk: 180 };
-  const ha = Math.acos(arg) * (180 / Math.PI);
-  return {
-    dawn: ((subLon - ha + 180) % 360 + 360) % 360 - 180,
-    dusk: ((subLon + ha + 180) % 360 + 360) % 360 - 180,
-  };
-}
-
-function buildTerminatorPath(now: Date, W: number, H: number): string {
-  const { lat: sLat, lon: sLon } = computeSubsolarPoint(now);
-  const lats = Array.from({ length: 181 }, (_, i) => 90 - i);
-  const dusk: {x:number;y:number}[] = [], dawn: {x:number;y:number}[] = [];
-  lats.forEach(lat => {
-    const t = terminatorLons(lat, sLon, sLat), py = ((90 - lat) / 180) * H;
-    if (!t)                              { dusk.push({x:W+10,y:py}); dawn.push({x:-10,y:py}); }
-    else if (t.dusk===180&&t.dawn===-180){ dusk.push({x:W+10,y:py}); dawn.push({x:-10,y:py}); }
-    else { dusk.push({x:((t.dusk+180)/360)*W,y:py}); dawn.push({x:((t.dawn+180)/360)*W,y:py}); }
-  });
-  const nLon     = ((sLon+180)%360+360)%360-180;
-  const tEq      = terminatorLons(0,sLon,sLat);
-  const dEqX     = tEq ? ((tEq.dusk+180)/360)*W : W/2;
-  const nTX      = ((nLon+180)/360)*W;
-  const east     = nTX > dEqX;
-  let d = '';
-  if (east) {
-    d += `M ${dusk[0].x.toFixed(1)} 0 `;
-    dusk.forEach(p=>{d+=`L ${p.x.toFixed(1)} ${p.y.toFixed(1)} `;});
-    d += `L ${W} ${H} L ${W} 0 Z M 0 0 `;
-    dawn.forEach(p=>{d+=`L ${p.x.toFixed(1)} ${p.y.toFixed(1)} `;});
-    d += `L 0 ${H} Z`;
-  } else {
-    d += `M ${dawn[0].x.toFixed(1)} 0 `;
-    dawn.forEach(p=>{d+=`L ${p.x.toFixed(1)} ${p.y.toFixed(1)} `;});
-    d += `L ${dusk[dusk.length-1].x.toFixed(1)} ${H} `;
-    for(let i=dusk.length-1;i>=0;i--){d+=`L ${dusk[i].x.toFixed(1)} ${dusk[i].y.toFixed(1)} `;}
-    d += 'Z';
+function nightAlphaFromCosZenith(cosZenith: number) {
+  if (cosZenith >= 0.12) return 0;
+  if (cosZenith >= -0.15) {
+    const t = (0.12 - cosZenith) / 0.27; // wider twilight band
+    return Math.round(125 * t);
   }
-  return d;
+  const deep = Math.min(1, (-cosZenith - 0.15) / 0.85);
+  return Math.round(125 + 105 * Math.pow(deep, 0.72));
 }
 
-export const TerminatorOverlay = memo(function TerminatorOverlay({ containerRef }: TerminatorOverlayProps) {
-  const {w,h}           = useContainerSize(containerRef);
-  const [path,setPath]  = useState('');
-  useEffect(()=>{
-    const u = () => setPath(buildTerminatorPath(new Date(), w, h));
-    u(); const id = setInterval(u, 60_000); return ()=>clearInterval(id);
-  },[w,h]);
+export const TerminatorOverlay = memo(function TerminatorOverlay({ containerRef, showDebug = false }: TerminatorOverlayProps) {
+  const {w,h} = useContainerSize(containerRef);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const [sunInfo, setSunInfo] = useState<{ lat: number; lon: number } | null>(null);
+
+  useEffect(() => {
+    const draw = () => {
+      const canvas = canvasRef.current;
+      if (!canvas || w <= 0 || h <= 0) return;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return;
+
+      if (canvas.width !== w || canvas.height !== h) {
+        canvas.width = w;
+        canvas.height = h;
+      }
+
+      const { lat: subLat, lon: subLon } = computeSubsolarPoint(new Date());
+      setSunInfo({ lat: subLat, lon: subLon });
+      const subLatRad = subLat * (Math.PI / 180);
+      const subLonRad = subLon * (Math.PI / 180);
+      const sx = Math.cos(subLatRad) * Math.cos(subLonRad);
+      const sy = Math.cos(subLatRad) * Math.sin(subLonRad);
+      const sz = Math.sin(subLatRad);
+
+      const lonCos = new Float64Array(w);
+      const lonSin = new Float64Array(w);
+      for (let x = 0; x < w; x++) {
+        const lon = ((x / Math.max(1, w - 1)) * 360 - 180) * (Math.PI / 180);
+        lonCos[x] = Math.cos(lon);
+        lonSin[x] = Math.sin(lon);
+      }
+
+      const latCos = new Float64Array(h);
+      const latSin = new Float64Array(h);
+      for (let y = 0; y < h; y++) {
+        const lat = (90 - (y / Math.max(1, h - 1)) * 180) * (Math.PI / 180);
+        latCos[y] = Math.cos(lat);
+        latSin[y] = Math.sin(lat);
+      }
+
+      const img = ctx.createImageData(w, h);
+      const data = img.data;
+      const r = 1, g = 5, b = 16;
+      let i = 0;
+      for (let y = 0; y < h; y++) {
+        const cLat = latCos[y];
+        const sLat = latSin[y];
+        for (let x = 0; x < w; x++) {
+          const nx = cLat * lonCos[x];
+          const ny = cLat * lonSin[x];
+          const nz = sLat;
+          const cosZenith = nx * sx + ny * sy + nz * sz;
+          const a = nightAlphaFromCosZenith(cosZenith);
+
+          data[i++] = r;
+          data[i++] = g;
+          data[i++] = b;
+          data[i++] = a;
+        }
+      }
+
+      ctx.clearRect(0, 0, w, h);
+      ctx.putImageData(img, 0, 0);
+    };
+
+    draw();
+    const id = setInterval(draw, 60_000);
+    return () => clearInterval(id);
+  }, [w, h]);
+
+  const dayLabel = sunInfo
+    ? {
+        left: `${((sunInfo.lon + 180) / 360) * 100}%`,
+        top: `${((90 - sunInfo.lat) / 180) * 100}%`,
+      }
+    : null;
+
+  const antiLon = sunInfo ? ((((sunInfo.lon + 180) % 360) + 360) % 360) - 180 : 0;
+  const antiLat = sunInfo ? -sunInfo.lat : 0;
+  const nightLabel = sunInfo
+    ? {
+        left: `${((antiLon + 180) / 360) * 100}%`,
+        top: `${((90 - antiLat) / 180) * 100}%`,
+      }
+    : null;
+
   return (
-    <svg aria-hidden="true" style={{position:'absolute',inset:0,width:'100%',height:'100%',pointerEvents:'none',zIndex:2}}
-      viewBox={`0 0 ${w} ${h}`} preserveAspectRatio="none">
-      <defs>
-        <filter id="term-blur"        x="-5%" y="-5%" width="110%" height="110%"><feGaussianBlur stdDeviation="8"/></filter>
-        <filter id="term-blur-subtle" x="-3%" y="-3%" width="106%" height="106%"><feGaussianBlur stdDeviation="3"/></filter>
-      </defs>
-      {path&&<path d={path} fill="rgba(0,4,20,0.35)"  filter="url(#term-blur)"/>}
-      {path&&<path d={path} fill="rgba(0,4,20,0.48)"  filter="url(#term-blur-subtle)"/>}
-      {path&&<path d={path} fill="none" stroke="rgba(255,210,100,0.22)" strokeWidth="1.2"/>}
-    </svg>
+    <>
+      <canvas
+        ref={canvasRef}
+        width={w}
+        height={h}
+        aria-hidden="true"
+        style={{
+          position: 'absolute',
+          inset: 0,
+          width: '100%',
+          height: '100%',
+          pointerEvents: 'none',
+          zIndex: 2,
+        }}
+      />
+      {dayLabel && (
+        <div style={{
+          position: 'absolute',
+          left: dayLabel.left,
+          top: dayLabel.top,
+          transform: 'translate(-50%, -50%)',
+          zIndex: 5,
+          pointerEvents: 'none',
+          padding: '3px 7px',
+          borderRadius: 999,
+          border: '1px solid rgba(255,223,129,0.45)',
+          background: 'rgba(50,40,8,0.74)',
+          color: '#f4d78c',
+          fontFamily: 'Azeret Mono, monospace',
+          fontSize: 8,
+          letterSpacing: 0.8,
+          textTransform: 'uppercase',
+          fontWeight: 600,
+        }}>
+          Day
+        </div>
+      )}
+      {nightLabel && (
+        <div style={{
+          position: 'absolute',
+          left: nightLabel.left,
+          top: nightLabel.top,
+          transform: 'translate(-50%, -50%)',
+          zIndex: 5,
+          pointerEvents: 'none',
+          padding: '3px 7px',
+          borderRadius: 999,
+          border: '1px solid rgba(126,147,181,0.4)',
+          background: 'rgba(8,16,32,0.8)',
+          color: '#a8bddc',
+          fontFamily: 'Azeret Mono, monospace',
+          fontSize: 8,
+          letterSpacing: 0.8,
+          textTransform: 'uppercase',
+          fontWeight: 600,
+        }}>
+          Night
+        </div>
+      )}
+      {showDebug && sunInfo && (
+        <div style={{
+          position: 'absolute',
+          left: 10,
+          bottom: 10,
+          zIndex: 6,
+          pointerEvents: 'none',
+          padding: '4px 7px',
+          borderRadius: 4,
+          border: '1px solid rgba(255,210,100,0.35)',
+          background: 'rgba(11,16,28,0.82)',
+          color: '#d9d18d',
+          fontFamily: 'Azeret Mono, monospace',
+          fontSize: 8,
+          letterSpacing: 0.5,
+          textTransform: 'uppercase',
+        }}>
+          Sun Lat {sunInfo.lat.toFixed(2)}° · Lon {sunInfo.lon.toFixed(2)}°
+        </div>
+      )}
+    </>
   );
 });
 
@@ -350,12 +469,13 @@ interface OrbitalOverlaysGroupProps {
   prediction: PredictPoint[];
   tick: number;
   containerRef: RefObject<HTMLDivElement | null>;
+  showSunDebug?: boolean;
 }
 
-export function OrbitalOverlaysGroup({ selectedSat, prediction, tick, containerRef }: OrbitalOverlaysGroupProps) {
+export function OrbitalOverlaysGroup({ selectedSat, prediction, tick, containerRef, showSunDebug = false }: OrbitalOverlaysGroupProps) {
   return (
     <>
-      <TerminatorOverlay containerRef={containerRef} />
+      <TerminatorOverlay containerRef={containerRef} showDebug={showSunDebug} />
       <HistoricalTrail selectedSat={selectedSat} tick={tick} containerRef={containerRef} />
       <PredictedPath selectedSat={selectedSat} prediction={prediction} containerRef={containerRef} />
     </>

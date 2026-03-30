@@ -120,8 +120,13 @@ function projectDebris(
   // px/km scale factor for this radar mode
   const scale = config.R / config.MAX_KM;
 
-  const rx = config.CX + dx * scale;
-  const ry = config.CY - dz * scale;
+  // Keep angular direction from X/Z plane but make radial placement use full 3D distance.
+  const planar = Math.sqrt(dx * dx + dz * dz);
+  const ux = planar > 1e-9 ? dx / planar : 1;
+  const uz = planar > 1e-9 ? dz / planar : 0;
+  const radialPx = Math.min(distKm, config.MAX_KM) * scale;
+  const rx = config.CX + ux * radialPx;
+  const ry = config.CY - uz * radialPx;
 
   // Clip to radar circle boundary
   const relX = rx - config.CX;
@@ -830,7 +835,11 @@ export function ExpandableBullseye({
             const dx = deb.r[0] - satellite.r[0], dy = deb.r[1] - satellite.r[1], dz = deb.r[2] - satellite.r[2];
             const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
             const sc = R / RADAR_MAX_KM;
-            const rx = CX + dx * sc, ry = CY - dz * sc;
+            const planar = Math.sqrt(dx * dx + dz * dz);
+            const ux = planar > 1e-9 ? dx / planar : 1;
+            const uz = planar > 1e-9 ? dz / planar : 0;
+            const radialPx = Math.min(dist, RADAR_MAX_KM) * sc;
+            const rx = CX + ux * radialPx, ry = CY - uz * radialPx;
             if (rx < 5 || rx > 415 || ry < 5 || ry > 405) return null;
             const isVeryClose = dist < 150;
             return (

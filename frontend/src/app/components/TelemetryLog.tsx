@@ -149,7 +149,7 @@ export function TelemetryLog({ selectedSatellite }: TelemetryLogProps = {}) {
   }, [logs]);
 
   return (
-    <div className="bg-[#05070d] border border-[#1f3c5e] rounded-[6px] p-[16px] h-full flex flex-col font-['JetBrains_Mono',monospace]">
+    <div className="bg-[#05070d] border border-[#1f3c5e] rounded-[6px] p-[10px] h-full flex flex-col font-['JetBrains_Mono',monospace]">
       <style>{`
         #telemetry-log::-webkit-scrollbar {
           width: 8px;
@@ -166,14 +166,14 @@ export function TelemetryLog({ selectedSatellite }: TelemetryLogProps = {}) {
         }
       `}</style>
       {/* Header */}
-      <div className="flex items-center justify-between mb-[12px] pb-[8px] border-b border-[#1f3c5e]">
+      <div className="flex items-center justify-between mb-[8px] pb-[6px] border-b border-[#1f3c5e]">
         <div className="flex items-center gap-[8px]">
           <div className={`w-[8px] h-[8px] rounded-full ${wsConnected ? 'bg-[#00ff88] animate-pulse' : 'bg-[#ff4444]'}`} />
-          <p className="text-[#00ff88] text-[12px] font-semibold">
+          <p className="text-[#00ff88] text-[11px] font-semibold">
             LIVE SYSTEM LOG / TELEMETRY FEED
           </p>
         </div>
-        <p className="text-[#666] text-[11px]">
+        <p className="text-[#666] text-[10px]">
           System Uptime: {String(uptime.hours).padStart(2,'0')}:
           {String(uptime.minutes).padStart(2,'0')}:
           {String(uptime.seconds).padStart(2,'0')}
@@ -189,7 +189,7 @@ export function TelemetryLog({ selectedSatellite }: TelemetryLogProps = {}) {
             <motion.div key={log.id}
               initial={{ opacity:0, y:5 }} animate={{ opacity:1, y:0 }}
               transition={{ duration:0.2 }}
-              className="text-[12px] mb-[4px] leading-[1.6]">
+              className="text-[11px] mb-[3px] leading-[1.35]">
               <span className="text-[#555]">[{log.timestamp}]</span>{' '}
               <span className="font-bold" style={{ color: logTypeColors[log.type] }}>
                 [{logTypeLabels[log.type]}]
