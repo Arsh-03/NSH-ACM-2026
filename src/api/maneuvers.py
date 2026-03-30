@@ -271,6 +271,8 @@ async def list_satellites():
             {
                 "id":          str(k),
                 "fuel_kg":     float(round(v.get("fuel_mass", 50.0), 2)),
+                "r":           [float(x) for x in v.get("r", [])],
+                "v":           [float(x) for x in v.get("v", [])],
                 "status":      str(v.get("status", "NOMINAL")),
                 "last_update": float(v.get("last_update", 0)),
             }
