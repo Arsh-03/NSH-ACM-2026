@@ -4,6 +4,7 @@ import * as Tooltip from '@radix-ui/react-tooltip';
 import { SatelliteTabs } from './SatelliteTabs';
 import { TelemetryLog } from './TelemetryLog';
 import { MapViewPanel } from './MapViewPanel';
+import { ExpandableBullseye } from './ExpandedRadar';
 import imgFrame2 from "../../assets/9394663ed06f79040e5fccebf1cd472a901e3df0.png";
 import imgFrame3 from "../../assets/earth_globe.jpg";
 import imgSatellite from "../../assets/6292a4c2f7fce59afb681a45c010a7b66e40fa69.png";
@@ -1473,7 +1474,7 @@ export default function EnhancedDashboard() {
         }}>
           {/* Bullseye Radar — full width top */}
           <div style={{ overflow: 'hidden', borderBottom: '1px solid #1a1a2e', minHeight: 0 }}>
-            <BullseyeRadarInline satellite={selectedSat} debrisList={debrisList} />
+            <ExpandableBullseye satellite={selectedSat} debrisList={debrisList} />
           </div>
           {/* Telemetry + Alerts side by side — bottom */}
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', minHeight: 0, overflow: 'hidden' }}>
