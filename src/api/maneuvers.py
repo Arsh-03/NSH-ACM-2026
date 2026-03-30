@@ -7,6 +7,7 @@ import numpy as np
 import time
 from datetime import datetime
 from src.comms.blackout import is_in_blackout
+from src.api import database as db
 
 router = APIRouter()
 
@@ -138,6 +139,10 @@ async def execute_burn(req: ManeuverRequest):
     sat_data["fuel_mass"] = float(round(current_fuel - fuel_spent, 4))
     sat_data["status"]    = "POST_BURN"
     maneuver_history[sat_key] = current_time
+
+    # Persistence update
+    db.upsert_satellite(sat_key, sat_data)
+    db.log_maneuver(sat_key, current_time, dv_vector.tolist(), fuel_spent, reason="MANEUVER")
 
     return {
         "status":              "BURN_SUCCESSFUL",
