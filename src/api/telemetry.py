@@ -12,6 +12,21 @@ from src.ai.ppo_agent import PPOAgent
 from src.ai.spatial_index import build_spatial_index, find_nearby_threats
 from src.api import database as db
 
+# Import recorder lazily to avoid circular import
+# (maneuvers.py imports orbital_registry from this file)
+def _record_maneuver_to_timeline(sat_id: str, burn_time: float, dv_vec, burn_id: str = None):
+    """Record a burn from the inline telemetry path into the maneuver timeline."""
+    try:
+        from src.api.maneuvers import _record_executed_maneuver
+        _record_executed_maneuver(
+            satellite_id=sat_id,
+            burn_time=burn_time,
+            dv_vector=[float(dv_vec[0]), float(dv_vec[1]), float(dv_vec[2])],
+            burn_id=burn_id,
+        )
+    except Exception:
+        pass  # Never let timeline recording crash the main telemetry path
+
 router = APIRouter()
 
 FUEL_BUDGET = 50.0
@@ -387,12 +402,16 @@ async def ingest_telemetry(payload: Dict[str, Any]):
         rec["status"]     = "MANEUVERING"
         status = "MANEUVER_REQUIRED"
         burn_no = rec.get("burn_count", 0) + 1
+        burn_id = f"AUTO-BURN-{sat_id}-{burn_no}"
         print(
             f"  BURN #{burn_no}: {sat_id} "
             f"| dv={dv_mag:.5f}km/s | fuel_left={rec['fuel_mass']:.2f}kg "
             f"| debris_dist={min_dist:.3f}km"
         )
-        rec["burn_count"] = rec.get("burn_count", 0) + 1
+        rec["burn_count"] = burn_no
+        # Record in maneuver timeline (both in-memory and DB)
+        _record_maneuver_to_timeline(sat_id, timestamp, dv_vec, burn_id=burn_id)
+        db.log_maneuver(sat_id, timestamp, [float(x) for x in dv_vec], float(dm), reason="COLLISION_AVOIDANCE")
 
     elif threat and cooling_down:
         # In cooldown — preserve MANEUVERING, next burn fires when cooldown expires

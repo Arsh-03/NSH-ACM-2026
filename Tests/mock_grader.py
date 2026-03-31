@@ -33,13 +33,28 @@ def circular_orbit_state(alt_km, inc_deg, raan_deg, ta_deg):
     return [x, y, z, vx, vy, vz]
 
 # ── Constellation ─────────────────────────────────────────────────────────────
+# ⚰️  Two dedicated graveyard-orbit test satellites:
+#   EOL-TEST-01: starts exactly at 2.5 kg threshold → triggers EOL immediately
+#   EOL-TEST-02: starts at 3.8 kg, drains 0.4 kg/tick → crosses threshold in ~3-4 ticks
+# Both positioned over ISTRAC Bengaluru so they're never in a comms blackout,
+# guaranteeing the auto_pilot can execute their graveyard burn.
 SATELLITES = [
+    # ── Graveyard test satellites (appear first so they're easy to spot) ──
+    {"id": "EOL-TEST-01", "alt": 545, "inc": 13,  "raan": 77,  "ta": 0,  "fuel": 2.5},
+    {"id": "EOL-TEST-02", "alt": 555, "inc": 13,  "raan": 77,  "ta": 10, "fuel": 3.8},
+    # ── Normal constellation ──
     {"id": "SAT-01-ARSH", "alt": 550, "inc": 53,  "raan": 0,   "ta": 0},
     {"id": "AETHER-02",   "alt": 560, "inc": 53,  "raan": 36,  "ta": 20},
     {"id": "AETHER-03",   "alt": 570, "inc": 53,  "raan": 72,  "ta": 40},
     {"id": "AETHER-04",   "alt": 550, "inc": 53,  "raan": 108, "ta": 60},
     {"id": "AETHER-05",   "alt": 560, "inc": 53,  "raan": 144, "ta": 80},
 ]
+
+# EOL_FUEL_DRAIN: how many kg to subtract from each EOL test sat per tick.
+# EOL-TEST-01 is already at threshold; EOL-TEST-02 drains until it crosses 2.5 kg.
+EOL_SATELLITES = {"EOL-TEST-01", "EOL-TEST-02"}
+EOL_FUEL_DRAIN = {"EOL-TEST-01": 0.0, "EOL-TEST-02": 0.4}  # kg/tick
+EOL_THRESHOLD  = 2.5  # must match src/api/telemetry.py:EOL_FUEL
 
 # Fill remaining satellites up to NUM_SATS
 for i in range(len(SATELLITES), NUM_SATS):
@@ -123,7 +138,8 @@ def simulate_evaluator():
         return
 
     # Fuel tracker — persists actual fuel across ticks
-    fuel_tracker: dict = { sat["id"]: 50.0 for sat in SATELLITES }
+    # Use per-satellite initial fuel from SATELLITES list (EOL sats start low)
+    fuel_tracker: dict = { sat["id"]: sat.get("fuel", 50.0) for sat in SATELLITES }
 
     # Build satellite states
     print("\n[SAT] Initialising constellation...")
@@ -143,9 +159,15 @@ def simulate_evaluator():
             fuel_tracker[sat["id"]] = result["fuel_remaining"]
 
         if result:
-            print(f"  [OK] {sat['id']:<20} | status={result.get('status')} "
-                  f"| dist={result.get('min_dist_km','?')}km "
-                  f"| dv={result.get('dv_magnitude',0):.5f} km/s")
+            eol_flag = result.get("eol_flag", False)
+            eol_marker = " ⚰️  EOL!" if eol_flag else ""
+            if sat["id"] in EOL_SATELLITES:
+                print(f"  [EOL] {sat['id']:<20} | fuel={fuel_tracker[sat['id']]:.2f}kg"
+                      f" | status={result.get('status')}{eol_marker}")
+            else:
+                print(f"  [OK] {sat['id']:<20} | status={result.get('status')} "
+                      f"| dist={result.get('min_dist_km','?')}km "
+                      f"| dv={result.get('dv_magnitude',0):.5f} km/s")
         else:
             print(f"  [FAIL] {sat['id']:<20} | FAILED — check server logs")
 
@@ -223,6 +245,26 @@ def simulate_evaluator():
 
             if result and result.get("fuel_remaining") is not None:
                 fuel_tracker[sat["id"]] = result["fuel_remaining"]
+
+            # ── EOL fuel drain simulation ─────────────────────────────────
+            # For EOL test sats: manually deplete fuel in the tracker each tick
+            # so the backend sees it crossing the 2.5 kg threshold.
+            # (Real satellites deplete via burn physics; we simulate it here.)
+            if sat["id"] in EOL_SATELLITES:
+                drain = EOL_FUEL_DRAIN.get(sat["id"], 0.0)
+                if drain > 0:
+                    fuel_tracker[sat["id"]] = max(0.0, fuel_tracker[sat["id"]] - drain)
+                status    = result.get("status", "?") if result else "NO_RESP"
+                fuel_left = fuel_tracker[sat["id"]]
+                eol_flag  = result.get("eol_flag", False) if result else False
+                graveyard = status in ("GRAVEYARD", "EOL_STANDBY", "EOL")
+                icon = "⚰️ " if graveyard else ("⚠️ " if eol_flag else "🛰️ ")
+                print(f"  {icon} EOL-WATCH {sat['id']:<16}"
+                      f" | fuel={fuel_left:.2f}kg"
+                      f" | status={status}"
+                      f" | eol_flag={eol_flag}")
+                if graveyard:
+                    print(f"    ✅ GRAVEYARD MANEUVER CONFIRMED for {sat['id']}!")
 
             # If a burn was executed, apply the delta-v to satellite state
             if result and result.get("status") == "MANEUVER_REQUIRED":

@@ -94,6 +94,9 @@ export interface SimSatellite {
   wsTargetR?: number[];
   wsTargetV?: number[];
   wsBlendRemainingMs?: number;
+  // True when the satellite was first seeded from a stale DB state and has not
+  // yet received a real-telemetry confirmation. History is suppressed until clear.
+  positionIsStale?: boolean;
 }
 
 /** Predicted future positions for the selected satellite */
@@ -116,6 +119,13 @@ const PREDICT_REGEN_FRAMES      = 360;          // regenerate prediction every ~
 // Max integration step to avoid numerical instability
 const MAX_DT_S                  = 0.1;          // clamp frame deltaTime to 100ms
 const WS_BLEND_DURATION_MS       = 300;          // smooth truth-anchor correction window
+// How far (km) the new WS position can be from current sim before we treat it
+// as a "session reset" (i.e. stale DB → real telemetry transition).
+// Keplerian drift over a typical 2-5s tick is <5km; anything more is a jump.
+const STALE_POSITION_THRESHOLD_KM = 50;          // km jump → force re-seed
+// When a stale→real transition is detected, use a longer blend to glide the
+// marker to the real position rather than snapping it.
+const WS_BOOTSTRAP_BLEND_MS      = 1200;         // ms — longer glide for first real fix
 
 // ── Math helpers ──────────────────────────────────────────────────────────────
 
@@ -333,10 +343,47 @@ export function useOrbitalSimulation({
       const existing = sim.get(ls.id);
       if (existing) {
         const statusChanged = existing.status !== ls.status;
-        // Blend toward authoritative state to avoid visible trajectory kinks.
+
+        // ── Stale-to-real transition detection ──────────────────────────────
+        // If positionIsStale is set, this is the first real telemetry for this
+        // satellite after the stale DB snapshot. Detect by computing how far the
+        // new WS position is from the current sim position.
+        //
+        // If the jump is large (> STALE_POSITION_THRESHOLD_KM), it means the
+        // DB position was stale and real telemetry just arrived. In that case:
+        //   1. Clear the history trail (the stale-seeded trail is wrong)
+        //   2. Re-seed history from the new authoritative position
+        //   3. Use a longer bootstrap blend so the dot glides rather than snaps
+        //   4. Clear the stale flag
+        if (existing.positionIsStale) {
+          const dx = ls.r[0] - existing.r[0];
+          const dy = ls.r[1] - existing.r[1];
+          const dz = ls.r[2] - existing.r[2];
+          const deltaKm = Math.sqrt(dx*dx + dy*dy + dz*dz);
+
+          if (deltaKm > STALE_POSITION_THRESHOLD_KM) {
+            // Real telemetry arrived — re-seed history from authoritative position
+            existing.history = seedHistory(ls.r, ls.v, wallClock);
+            seededRef.current.add(ls.id);
+            // Use longer bootstrap blend for this first correction
+            existing.wsBlendRemainingMs = WS_BOOTSTRAP_BLEND_MS;
+          } else {
+            // Small delta — the DB position was close enough to real
+            // Seed history normally if not already done
+            if (!seededRef.current.has(ls.id)) {
+              existing.history = seedHistory(ls.r, ls.v, wallClock);
+              seededRef.current.add(ls.id);
+            }
+            existing.wsBlendRemainingMs = WS_BLEND_DURATION_MS;
+          }
+          existing.positionIsStale = false;
+        } else {
+          // Normal tick update — standard short blend
+          existing.wsBlendRemainingMs = WS_BLEND_DURATION_MS;
+        }
+
         existing.wsTargetR = [...ls.r];
         existing.wsTargetV = [...ls.v];
-        existing.wsBlendRemainingMs = WS_BLEND_DURATION_MS;
         existing.status = ls.status;
         existing.fuel   = ls.fuel;
 
@@ -350,6 +397,10 @@ export function useOrbitalSimulation({
         existing.lon = geo.lon;
         existing.alt = geo.alt;
       } else {
+        // ── First time we see this satellite ────────────────────────────────
+        // We do NOT seed history here because this first message may be carrying
+        // stale DB positions. We mark it as stale and defer history seeding until
+        // the second message (real telemetry) arrives and we can check the delta.
         const geo = eciToGeo(ls.r, getGmstRad(simTimeRef.current));
         const newSat: SimSatellite = {
           id:      ls.id,
@@ -361,16 +412,12 @@ export function useOrbitalSimulation({
           lat:     geo.lat,
           lon:     geo.lon,
           alt:     geo.alt,
-          history: [],
+          history: [],                // empty — do NOT seed from potentially stale r/v
           wsTargetR: undefined,
           wsTargetV: undefined,
           wsBlendRemainingMs: 0,
+          positionIsStale: true,     // will be cleared on next real telemetry
         };
-
-        if (!seededRef.current.has(ls.id) && ls.r.length === 3 && ls.v.length === 3) {
-          newSat.history = seedHistory(ls.r, ls.v, simTimeRef.current);
-          seededRef.current.add(ls.id);
-        }
         sim.set(ls.id, newSat);
       }
     });
@@ -399,7 +446,7 @@ export function useOrbitalSimulation({
       lastTimeRef.current = now;
 
       const wallClock = Date.now();
-      const gmstRad   = getGmstRad(new Date(wallClock));
+      const gmstRad   = getGmstRad(wallClock);
       const sim       = simRef.current;
 
       // ── Update every satellite position ───────────────────────────────────

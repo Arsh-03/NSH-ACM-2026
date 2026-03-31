@@ -32,6 +32,12 @@ export function TelemetryLog({ selectedSatellite }: TelemetryLogProps = {}) {
   const logRef    = useRef<HTMLDivElement>(null);
   const wsRef     = useRef<WebSocket | null>(null);
   const startTime = useRef(Date.now());
+  // Track last logged status per satellite to avoid duplicate log spam.
+  // Only emit a log when a satellite's status actually CHANGES.
+  const lastLoggedStatusRef = useRef<Map<string, string>>(new Map());
+  // Enforce a per-satellite cooldown (ms) so rapid status flapping doesn't flood.
+  const lastLogTimeRef      = useRef<Map<string, number>>(new Map());
+  const LOG_COOLDOWN_MS     = 5000; // minimum gap between logs for the same sat
 
   const addLog = (type: LogEntry['type'], message: string) => {
     const now = new Date();
@@ -93,20 +99,36 @@ export function TelemetryLog({ selectedSatellite }: TelemetryLogProps = {}) {
           if (msg.type === 'state_update') {
             const sats   = msg.satellites || [];
             const debris = msg.debris_count || 0;
+            const now_ms = Date.now();
 
-            // Log fleet status updates
-            const atRisk = sats.filter((s: any) =>
-              s.status === 'AT_RISK' || s.status === 'MANEUVERING');
+            // Only log when a satellite's status CHANGES — never on repeat ticks.
+            sats.forEach((s: any) => {
+              const prev      = lastLoggedStatusRef.current.get(s.id);
+              const lastTime  = lastLogTimeRef.current.get(s.id) ?? 0;
+              const tooRecent = (now_ms - lastTime) < LOG_COOLDOWN_MS;
 
-            if (atRisk.length > 0) {
-              atRisk.forEach((s: any) => {
-                if (s.status === 'MANEUVERING') {
-                  addLog('critical', `BURN EXECUTED: ${s.id} — collision avoidance maneuver active`);
-                } else {
-                  addLog('warning', `CONJUNCTION ALERT: ${s.id} — debris within danger zone`);
-                }
-              });
-            }
+              // Skip if status hasn't changed, or if we logged this sat too recently
+              if (s.status === prev || tooRecent) return;
+
+              // Status transition — decide log level and message
+              if (s.status === 'MANEUVERING') {
+                addLog('critical', `BURN EXECUTED: ${s.id} — collision avoidance maneuver active`);
+              } else if (s.status === 'AT_RISK') {
+                addLog('warning', `CONJUNCTION ALERT: ${s.id} — debris within danger zone`);
+              } else if (s.status === 'RECOVERING' && prev === 'MANEUVERING') {
+                addLog('info', `THREAT CLEARED: ${s.id} — returning to nominal slot`);
+              } else if (s.status === 'EOL' || s.status === 'EOL_STANDBY') {
+                addLog('warning', `EOL TRIGGERED: ${s.id} — fuel critical, graveyard maneuver pending`);
+              } else if (s.status === 'GRAVEYARD') {
+                addLog('critical', `GRAVEYARD BURN: ${s.id} — decommissioned to safe orbit`);
+              } else if (s.status === 'NOMINAL' && prev && prev !== 'NOMINAL') {
+                addLog('info', `${s.id} — status nominal, back in orbital slot`);
+              }
+
+              // Record the new status and log time
+              lastLoggedStatusRef.current.set(s.id, s.status);
+              lastLogTimeRef.current.set(s.id, now_ms);
+            });
 
             // Periodic fleet summary (every ~10 updates)
             if (Math.random() < 0.1) {

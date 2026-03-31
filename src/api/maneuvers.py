@@ -274,14 +274,52 @@ async def get_maneuver_history(satellite_id: str):
 
 @router.get("/maneuver/timeline")
 async def get_maneuver_timeline():
+    # Pull from DB for persistent history (survives restarts)
+    db_executed = []
+    try:
+        conn = db.get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT sat_id, burn_time, dv_x, dv_y, dv_z, dv_mag, fuel_consumed, reason
+            FROM maneuvers ORDER BY burn_time DESC LIMIT 200
+        """)
+        rows = cursor.fetchall()
+        conn.close()
+        for row in rows:
+            db_executed.append({
+                "satellite_id": row["sat_id"],
+                "burn_id":      f"DB-{row['sat_id']}-{int(row['burn_time'])}",
+                "burn_start":   float(row["burn_time"]),
+                "burn_end":     float(row["burn_time"]),
+                "cooldown_end": float(row["burn_time"]) + THERMAL_COOLDOWN,
+                "dv_vector":    [row["dv_x"], row["dv_y"], row["dv_z"]],
+                "dv_magnitude": float(row["dv_mag"] or 0),
+                "fuel_consumed": float(row["fuel_consumed"] or 0),
+                "reason":       row["reason"] or "MANEUVER",
+                "status":       "EXECUTED",
+            })
+    except Exception as e:
+        print(f"[timeline] DB read error: {e}")
+
+    # Merge in-memory + DB, deduplicate by (satellite_id, burn_start rounded to 1s)
+    seen = set()
+    merged_executed = []
+    for entry in list(executed_maneuvers) + db_executed:
+        key = (entry.get("satellite_id", ""), round(float(entry.get("burn_start", 0))))
+        if key not in seen:
+            seen.add(key)
+            merged_executed.append(entry)
+
+    merged_executed.sort(key=lambda m: m.get("burn_start", 0))
     pending = sorted(scheduled_maneuvers, key=lambda m: m["burn_time"])
-    executed = sorted(executed_maneuvers, key=lambda m: m["burn_start"])
+
     return {
-        "pending": pending,
-        "executed": executed,
-        "pending_count": len(pending),
-        "executed_count": len(executed),
+        "pending":        pending,
+        "executed":       merged_executed,
+        "pending_count":  len(pending),
+        "executed_count": len(merged_executed),
     }
+
 
 
 @router.get("/maneuver/registry")
