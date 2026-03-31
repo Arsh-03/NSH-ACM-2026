@@ -172,12 +172,19 @@ function parseNumericValue(value: string) {
 
 // ── Live data hook ────────────────────────────────────────────────────────────
 function useLiveData() {
-  const [satellites,  setSatellites]  = useState<LiveSat[]>([]);
-  const [debrisList,  setDebrisList]  = useState<{id:string;r:number[];v:number[]}[]>([]);
-  const [counts,      setCounts]      = useState({ satellites:0, debris:0, at_risk:0 });
-  const [connected,   setConnected]   = useState(false);
-  const [istTime,     setIstTime]     = useState('--:--:--');
-  const wsRef = useRef<WebSocket | null>(null);
+  const [satellites,    setSatellites]    = useState<LiveSat[]>([]);
+  const [debrisList,    setDebrisList]    = useState<{id:string;r:number[];v:number[]}[]>([]);
+  const [counts,        setCounts]        = useState({ satellites:0, debris:0, at_risk:0 });
+  const [connected,     setConnected]     = useState(false);
+  const [istTime,       setIstTime]       = useState('--:--:--');
+  // liveDataReady: stays false until the SECOND WS message.
+  // The first message is the DB-seeded snapshot triggered by our own get_state;
+  // subsequent messages are real telemetry pushes from the backend/mock grader.
+  // Rendering with stale DB positions and then jumping to real positions causes
+  // the visible "satellite teleport" effect — we suppress the map until ready.
+  const [liveDataReady, setLiveDataReady] = useState(false);
+  const wsRef          = useRef<WebSocket | null>(null);
+  const msgCountRef    = useRef<number>(0); // counts WS messages received this connection
 
   useEffect(() => {
     const clock = setInterval(() => {
@@ -190,6 +197,7 @@ function useLiveData() {
     }, 1000);
 
     const connect = () => {
+      msgCountRef.current = 0; // reset on each new connection
       const ws = new WebSocket(`ws://${window.location.hostname}:8000/ws`);
       wsRef.current = ws;
       ws.onopen  = () => { setConnected(true); ws.send(JSON.stringify({type:'get_state'})); };
@@ -197,12 +205,30 @@ function useLiveData() {
         try {
           const msg = JSON.parse(e.data);
           if (msg.type === 'state_update') {
+            msgCountRef.current += 1;
+
+            // Message #1 = the get_state response seeded from the DB snapshot.
+            // We consume it for counts but do NOT expose it as satellite positions
+            // so the map stays blank instead of snapping to stale DB coordinates.
+            // Message #2+ = real telemetry: accept everything and mark as ready.
+            if (msgCountRef.current === 1) {
+              // Still update counts so the header shows satellite numbers
+              setCounts({
+                satellites: msg.sat_count || (msg.satellites || []).length,
+                debris:     msg.debris_count || (msg.debris_compact || []).length,
+                at_risk:    (msg.satellites||[]).filter((s:LiveSat) =>
+                  s.status==='AT_RISK'||s.status==='MANEUVERING').length,
+              });
+              // Do NOT call setSatellites — leave map empty until real data arrives.
+              return;
+            }
+
+            // Real telemetry — set everything and mark data as ready
             setSatellites(msg.satellites || []);
             const compact = msg.debris_compact || [];
-            // Map [id, x, y, z] compact format to {id, r}
-            setDebrisList(compact.map((d: any) => ({ 
-              id: d[0], 
-              r: [d[1], d[2], d[3]] 
+            setDebrisList(compact.map((d: any) => ({
+              id: d[0],
+              r: [d[1], d[2], d[3]]
             })));
             setCounts({
               satellites: msg.sat_count || (msg.satellites || []).length,
@@ -210,6 +236,7 @@ function useLiveData() {
               at_risk:    (msg.satellites||[]).filter((s:LiveSat) =>
                 s.status==='AT_RISK'||s.status==='MANEUVERING').length,
             });
+            if (!liveDataReady) setLiveDataReady(true);
           }
         } catch(_){}
       };
@@ -229,7 +256,7 @@ function useLiveData() {
     return () => { clearInterval(clock); clearInterval(poll); wsRef.current?.close(); };
   }, []);
 
-  return { satellites, debrisList, counts, connected, istTime };
+  return { satellites, debrisList, counts, connected, istTime, liveDataReady };
 }
 
 // ── Three.js Globe ───────────────────────────────────────────────────────────
@@ -1563,7 +1590,7 @@ function ManeuverTimelineModule({ selectedId, satellites }: { selectedId?: strin
 
 // ── Main Dashboard ────────────────────────────────────────────────────────────
 export default function EnhancedDashboard() {
-  const { satellites: liveSats, debrisList, counts, connected, istTime } = useLiveData();
+  const { satellites: liveSats, debrisList, counts, connected, istTime, liveDataReady } = useLiveData();
   const [selectedId,  setSelectedId]  = useState<string>('');
   const MAP_DEBRIS_RANGE_KM = 500;
 
@@ -1806,7 +1833,41 @@ export default function EnhancedDashboard() {
           minHeight: 0,
           borderRight: '1px solid #1a1a2e',
         }}>
-          <MapViewPanel satellites={tableRows} debrisList={mapDebrisList} selectedId={selectedId} onSelect={setSelectedId} debrisFilterKm={MAP_DEBRIS_RANGE_KM} />
+          {/* Loading overlay — shown until first real live telemetry arrives */}
+          {!liveDataReady && (
+            <div style={{
+              position: 'absolute', inset: 0, zIndex: 50,
+              background: 'rgba(3,2,14,0.82)',
+              display: 'flex', flexDirection: 'column',
+              alignItems: 'center', justifyContent: 'center',
+              gap: 12, pointerEvents: 'none',
+              backdropFilter: 'blur(2px)',
+            }}>
+              {/* Spinning satellite icon */}
+              <motion.img
+                src={imgSatellite}
+                style={{ width: 36, height: 36, opacity: 0.7 }}
+                animate={{ rotate: 360 }}
+                transition={{ duration: 3, repeat: Infinity, ease: 'linear' }}
+              />
+              <p style={{
+                color: '#3a7fff', fontSize: 11,
+                fontFamily: 'Azeret Mono, monospace',
+                letterSpacing: 1.5, opacity: 0.85,
+              }}>
+                AWAITING LIVE TELEMETRY
+              </p>
+              {/* Pulsing horizontal bar */}
+              <div style={{ width: 160, height: 2, background: '#0d1d3a', borderRadius: 2, overflow: 'hidden' }}>
+                <motion.div
+                  style={{ height: '100%', background: '#3a7fff', borderRadius: 2 }}
+                  animate={{ x: ['-100%', '200%'] }}
+                  transition={{ duration: 1.4, repeat: Infinity, ease: 'easeInOut' }}
+                />
+              </div>
+            </div>
+          )}
+          <MapViewPanel satellites={liveDataReady ? tableRows : []} debrisList={liveDataReady ? mapDebrisList : []} selectedId={selectedId} onSelect={setSelectedId} debrisFilterKm={MAP_DEBRIS_RANGE_KM} />
         </div>
 
         {/* ══ RIGHT COLUMN: radar + telemetry + compliance modules ══ */}
@@ -1827,7 +1888,7 @@ export default function EnhancedDashboard() {
         }}>
           {/* Bullseye Radar — full width top */}
           <div style={{ overflow: 'hidden', border: '1px solid #1a1a2e', minHeight: 0, borderRadius: 8 }}>
-            <ExpandableBullseye satellite={selectedSat} debrisList={debrisList} />
+            <ExpandableBullseye satellite={liveDataReady ? selectedSat : undefined} debrisList={liveDataReady ? debrisList : []} />
           </div>
           {/* Telemetry + Alerts side by side — bottom */}
           <div style={{ display: 'grid', gridTemplateColumns: compactLayout ? '1fr' : '1fr 1fr', minHeight: 0, overflow: 'hidden', gap: 8 }}>
@@ -1841,7 +1902,7 @@ export default function EnhancedDashboard() {
           {/* Ground Track and Heatmap side by side */}
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, minHeight: 0, overflow: 'hidden' }}>
             <div style={{ minHeight: 0, overflow: 'hidden' }}>
-              <GroundTrackModule liveSats={liveSats} selectedId={selectedId} />
+              <GroundTrackModule liveSats={liveDataReady ? liveSats : []} selectedId={selectedId} />
             </div>
             <div style={{ minHeight: 0, overflow: 'hidden' }}>
               <ResourceHeatmapModule satellites={tableRows} selectedSatellite={selectedSat} />

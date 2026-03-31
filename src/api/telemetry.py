@@ -129,6 +129,9 @@ def scan_full_fleet():
             threat, min_dist, closest = check_threats_for_sat(sat_pos, GLOBAL_DEBRIS_IDS, GLOBAL_SPATIAL_TREE)
             data["min_dist_km"]    = min_dist
             data["closest_debris"] = closest
+            # Never overwrite terminal EOL/GRAVEYARD states
+            if data.get("status") in ("EOL", "GRAVEYARD"):
+                continue
             if threat:
                 db.log_alert(oid, closest, time.time(), min_dist)
                 # Only overwrite to AT_RISK if we aren't already maneuvering or recovering
@@ -280,6 +283,30 @@ async def ingest_telemetry(payload: Dict[str, Any]):
         db.upsert_satellite(sat_id, rec)
 
     rec = orbital_registry[sat_id]
+
+    # ── EOL check — must happen BEFORE any burn logic ─────────────────────────
+    # Per MISSION_SPECS: fuel threshold is 5% of 50kg = 2.5kg.
+    # Set EOL immediately so auto_pilot can schedule the graveyard maneuver.
+    # GRAVEYARD and EOL satellites must NOT execute normal burns here.
+    if fuel_kg <= EOL_FUEL and rec.get("status") not in ("GRAVEYARD", "EOL"):
+        rec["status"] = "EOL"
+        print(f"  ⚠️  EOL TRIGGERED: {sat_id} | fuel={fuel_kg:.3f}kg <= {EOL_FUEL}kg threshold")
+        db.upsert_satellite(sat_id, rec)
+
+    if rec.get("status") in ("EOL", "GRAVEYARD"):
+        # Skip all normal burns — auto_pilot handles the single graveyard maneuver
+        return {
+            "status":         "EOL_STANDBY",
+            "sat_id":         str(sat_id),
+            "delta_v":        [0.0, 0.0, 0.0],
+            "dv_magnitude":   0.0,
+            "fuel_remaining": round(float(rec["fuel_mass"]), 4),
+            "eol_flag":       True,
+            "min_dist_km":    9999.0,
+            "closest_debris": None,
+            "accepted":       True,
+        }
+
     threat, min_dist, closest = check_threats_for_sat(sat_arr[:3], GLOBAL_DEBRIS_IDS, GLOBAL_SPATIAL_TREE)
     rec["min_dist_km"]    = min_dist
     rec["closest_debris"] = closest
@@ -395,8 +422,6 @@ async def ingest_telemetry(payload: Dict[str, Any]):
                 rec["recover_ticks"] = 0
         elif threat:
             rec["status"] = "AT_RISK"
-        elif rec["fuel_mass"] <= EOL_FUEL:
-            rec["status"] = "EOL"
         else:
             rec["status"] = "NOMINAL"
         status = "NOMINAL"
