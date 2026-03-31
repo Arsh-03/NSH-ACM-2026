@@ -462,7 +462,6 @@ interface GroundTrackMapProps {
 
 function GroundTrackMap({ liveSats, debrisList, selectedId, onSelect }: GroundTrackMapProps) {
   const containerRef = useRef<HTMLDivElement>(null);
-  const [showSunDebug, setShowSunDebug] = useState(false);
 
   // LOCAL selection state — controls trail visibility independently
   const [mapSelectedId, setMapSelectedId] = useState<string | null>(selectedId || null);
@@ -528,33 +527,9 @@ function GroundTrackMap({ liveSats, debrisList, selectedId, onSelect }: GroundTr
         prediction={prediction}
         tick={tick}
         containerRef={containerRef}
-        showSunDebug={showSunDebug}
       />
 
-      {/* z:6 Day/Night debug toggle */}
-      <button
-        onClick={() => setShowSunDebug((v) => !v)}
-        style={{
-          position: 'absolute',
-          left: 10,
-          top: 10,
-          zIndex: 6,
-          borderRadius: 5,
-          border: `1px solid ${showSunDebug ? 'rgba(255,210,100,0.7)' : 'rgba(58,127,255,0.45)'}`,
-          background: showSunDebug ? 'rgba(36,30,10,0.82)' : 'rgba(5,12,28,0.78)',
-          color: showSunDebug ? '#e9d596' : '#9ec1f2',
-          fontFamily: 'Azeret Mono, monospace',
-          fontSize: 8,
-          letterSpacing: 1,
-          textTransform: 'uppercase',
-          padding: '4px 7px',
-          cursor: 'pointer',
-          backdropFilter: 'blur(4px)',
-        }}
-        title="Toggle day/night sun debug"
-      >
-        {showSunDebug ? 'Hide Sun Debug' : 'Show Sun Debug'}
-      </button>
+
 
       {/* z:5 Graticule */}
       <svg aria-hidden="true" style={{
