@@ -1867,7 +1867,14 @@ export default function EnhancedDashboard() {
               </div>
             </div>
           )}
-          <MapViewPanel satellites={liveDataReady ? tableRows : []} debrisList={liveDataReady ? mapDebrisList : []} selectedId={selectedId} onSelect={setSelectedId} debrisFilterKm={MAP_DEBRIS_RANGE_KM} />
+          <MapViewPanel
+            key={liveDataReady ? 'live' : 'init'}
+            satellites={liveDataReady ? tableRows : []}
+            debrisList={liveDataReady ? mapDebrisList : []}
+            selectedId={selectedId}
+            onSelect={setSelectedId}
+            debrisFilterKm={MAP_DEBRIS_RANGE_KM}
+          />
         </div>
 
         {/* ══ RIGHT COLUMN: radar + telemetry + compliance modules ══ */}
