@@ -1,0 +1,156 @@
+\documentclass[11pt,a4paper]{article}
+
+% --- Packages ---
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage{amsmath, amssymb, amsfonts}
+\usepackage{graphicx}
+\usepackage{geometry}
+\usepackage{hyperref}
+\usepackage{booktabs}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{float}
+\usepackage{caption}
+\usepackage{subcaption}
+
+% --- Page Layout ---
+\geometry{margin=1in}
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue,
+    filecolor=magenta,      
+    urlcolor=cyan,
+    pdftitle={Autonomous Constellation Management System - Project AETHER},
+}
+
+% --- Formatting ---
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{1.2ex plus 0.5ex minus 0.2ex}
+
+% --- Title Page ---
+\title{
+    \vspace{-2cm}
+    \includegraphics[width=0.4\textwidth]{Syntaxion.png} \\
+    \vspace{1cm}
+    \textbf{Project AETHER: Autonomous Constellation Management System} \\
+    \large National Space Hackathon 2026 \\
+    \textit{Orbital Debris Avoidance \& Constellation Management}
+}
+\author{Team Syntaxion}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+As Low Earth Orbit (LEO) becomes increasingly congested with commercial mega-constellations and millions of debris fragments, traditional human-in-the-loop collision avoidance systems are no longer scalable. This report details the architecture and implementation of Project AETHER, an Autonomous Constellation Manager (ACM) designed to handle high-frequency telemetry, perform predictive conjunction assessment using KD-Trees, and execute optimal collision avoidance and recovery maneuvers using Proximal Policy Optimization (PPO). Our system adheres to J2-perturbed orbital mechanics and strict propellant constraints, ensuring both safety and mission uptime.
+\end{abstract}
+
+\tableofcontents
+\newpage
+
+\section{Introduction}
+\label{sec:introduction}
+The rapid expansion of space-based services has led to a critical density of objects in LEO, bringing the threat of Kessler Syndrome to the forefront of orbital operations. Project AETHER (Autonomous Evasion and Trajectory Handling for Extra-atmospheric Risk) aims to modernize satellite operations by shifting from ground-reliant piloting to onboard autonomy.
+
+The primary challenges addressed include:
+\begin{itemize}
+    \item \textbf{Scalability}: Processing thousands of satellites and debris fragments.
+    \item \textbf{Latency}: Operating through communication blackout zones.
+    \item \textbf{Efficiency}: Minimizing $\Delta v$ consumption while maintaining orbital slots.
+\end{itemize}
+
+\section{System Architecture}
+\label{sec:architecture}
+The Project AETHER software suite is built as a distributed microservice architecture, containerized using Docker for reproducible deployment.
+
+\subsection{Backend Components}
+\begin{itemize}
+    \item \textbf{Telemetry Processor}: Handles asynchronous ingestion of ECI state vectors at port 8000.
+    \item \textbf{Physics Engine}: Propagates objects using 4th Order Runge-Kutta (RK4) integration with J2 perturbation modeling.
+    \item \textbf{Autonomous Controller}: A deep reinforcement learning agent (PPO) and a Physics-Informed Neural Network (PINN) that coordinates maneuvers and predicts trajectories.
+    \item \textbf{Spatial Indexing Layer}: Uses SciPy-based KD-Trees for $O(\log N)$ proximity searches.
+\end{itemize}
+
+\subsection{Frontend: Orbital Insight Visualizer}
+A real-time 2D Ground Track visualizer using Canvas/WebGL to display the sub-satellite points, historical trails, and predicted trajectories.
+
+\section{Numerical Methods and Orbital Mechanics}
+\label{sec:physics}
+
+\subsection{Equations of Motion with J2 Perturbation}
+Orbits are modeled using the Earth-Centered Inertial (ECI) coordinate frame. The acceleration vector $\vec{a}$ includes the primary gravitational term and the J2 perturbation due to Earth's oblateness:
+\begin{equation}
+    \frac{d^2\vec{r}}{dt^2} = -\frac{\mu}{|\vec{r}|^3}\vec{r} + \vec{a}_{J2}
+\end{equation}
+The J2 acceleration $\vec{a}_{J2}$ accounts for nodal regression and apsidal precession, critical for long-term station-keeping:
+\begin{equation}
+    \vec{a}_{J2} = \frac{3}{2} \frac{J_2 \mu R_E^2}{|\vec{r}|^5} \left[ \begin{pmatrix} x(\frac{5z^2}{|\vec{r}|^2} - 1) \\ y(\frac{5z^2}{|\vec{r}|^2} - 1) \\ z(\frac{5z^2}{|\vec{r}|^2} - 3) \end{pmatrix} \right]
+\end{equation}
+
+\subsection{Numerical Integration (RK4)}
+We employ a 4th Order Runge-Kutta method for high-fidelity propagation of state vectors:
+\begin{align*}
+    k_1 &= f(t_n, y_n) \\
+    k_2 &= f(t_n + \frac{h}{2}, y_n + h \frac{k_1}{2}) \\
+    k_3 &= f(t_n + \frac{h}{2}, y_n + h \frac{k_2}{2}) \\
+    k_4 &= f(t_n + h, y_n + h k_3) \\
+    y_{n+1} &= y_n + \frac{h}{6} (k_1 + 2k_2 + 2k_3 + k_4)
+\end{align*}
+
+\subsection{Propulsion and Fuel Mass Depletion}
+Thruster burns are modeled as impulsive changes in velocity ($\Delta \vec{v}$). Propellant consumption follows the Tsiolkovsky rocket equation:
+\begin{equation}
+    \Delta m = m_{current} \left( 1 - e^{-\frac{|\Delta \vec{v}|}{I_{sp} g_0}} \right)
+\end{equation}
+We strictly enforce a 600-second thermal cooldown between consecutive burns on the same satellite.
+
+\section{Spatial Optimization and Conjunction Assessment}
+\label{sec:spatial}
+To avoid $O(N^2)$ bottlenecks during conjunction assessment, AETHER implements a KD-Tree spatial index. 
+
+\subsection{CDMs and TCA Calculation}
+The system generates Conjunction Data Messages (CDMs) whenever a debris fragment is predicted to enter a 100-meter danger sphere around a satellite.
+\begin{itemize}
+    \item \textbf{Indexing}: All debris positions are stored in a KD-Tree.
+    \item \textbf{Querying}: Satellites query the tree for nearest neighbors within a defined threat radius (e.g., 5 km).
+    \item \textbf{TCA Determination}: For identified threats, time of closest approach (TCA) is calculated via iterative minimization of the relative distance vector.
+\end{itemize}
+
+\section{Autonomous Maneuvering and AI Logic}
+\label{sec:ai}
+
+\subsection{Proximal Policy Optimization (PPO)}
+Evasion maneuvers are determined by a PPO reinforcement learning agent. The state space includes the satellite's relative position/velocity to the threat, remaining fuel, and slot deviation.
+\begin{itemize}
+    \item \textbf{Actor-Critic Architecture}: Two 256-unit hidden layer networks process inputs to output optimal $\Delta v$ vectors in the Radial-Transverse-Normal (RTN) frame.
+    \item \textbf{Reward Function}: Penalizes collisions severely and penalizes $\Delta v$ consumption and slot drift.
+\end{itemize}
+
+\subsection{Physics-Informed Neural Networks (PINNs)}
+To enhance trajectory prediction, we implement a PINN model (\texttt{OrbitPINN}). Unlike traditional black-box neural networks, our PINN incorporates the equations of motion directly into its loss function:
+\begin{equation}
+    \mathcal{L}_{physics} = \left\| \frac{d\vec{r}}{dt} - \vec{v}_{pred} \right\|^2 + \left\| \frac{d\vec{v}}{dt} - \vec{a}_{total\_physics} \right\|^2
+\end{equation}
+This ensures that the predicted state vectors $S(t) = [x, y, z, v_x, v_y, v_z]$ strictly obey the J2-perturbed gravitational laws, even when data is sparse or noisy.
+
+\subsection{End-of-Life (EOL) \& Graveyard Orbit Management}
+Adhering to the 5\% fuel depletion constraint, AETHER autonomously detects EOL status. Upon reaching this threshold, the system schedules a one-time prograde burn (e.g., $+5$ m/s) to raise the satellite into a stable graveyard orbit, mitigating future collision risks.
+
+\subsection{Strategic Lookahead and Performance}
+To maintain high-frequency telemetry processing without $O(N^2)$ lag, our \texttt{AutoPilot} utilizes:
+\begin{itemize}
+    \item \textbf{Strategic Lookahead}: Preemptively calculates conjunction risks up to 24 hours in advance.
+    \item \textbf{Asynchronous Threading}: Numerical integration and threat analysis are delegated to thread pools via \texttt{asyncio.to\_thread}, preventing event-loop blocking.
+\end{itemize}
+
+\subsection{Station-Keeping and Recovery}
+After an evasion maneuver, the system calculates a recovery burn to return the satellite to its nominal orbital slot ($\pm 10$ km radius). This ensures high constellation uptime even under constant debris threats.
+
+\section{Conclusion}
+Project AETHER provides a robust, scalable framework for autonomous space traffic management. By integrating high-fidelity orbital mechanics with cutting-edge AI and spatial optimization, we demonstrate a path toward sustainable and safe LEO operations for the next generation of mega-constellations.
+
+\end{document}
