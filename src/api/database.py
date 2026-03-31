@@ -16,6 +16,7 @@ def init_db():
     conn = get_db_connection()
     cursor = conn.cursor()
 
+
     # 1. Satellite Registry (Current State)
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS satellite_registry (
@@ -71,6 +72,9 @@ def init_db():
     conn.commit()
     conn.close()
     print(f"📦 Database initialized at {DB_PATH}")
+
+init_db()
+
 
 def load_registry_from_db():
     """Returns a dict corresponding to orbital_registry from the database"""

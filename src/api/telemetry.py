@@ -60,15 +60,9 @@ orbital_registry: Dict[str, dict] = {}
 GLOBAL_SPATIAL_TREE: Optional[Any] = None
 GLOBAL_DEBRIS_IDS: List[str] = []
 
-def sync_registry_with_db():
-    db.init_db()
-    db_reg = db.load_registry_from_db()
-    if db_reg:
-        print(f"📦 Restoring {len(db_reg)} satellites from database.")
-        orbital_registry.update(db_reg)
+# registry initialization removed to prevent loading stale DB data on startup.
+# db.init_db is called during maneuvers or other persistent tasks.
 
-# Global initialization call (happens on first import)
-sync_registry_with_db()
 
 
 def _parse_timestamp(value: Any) -> float:
