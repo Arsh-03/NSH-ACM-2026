@@ -781,8 +781,8 @@ export function ExpandableBullseye({
       height: '100%',
       display: 'flex',
       flexDirection: 'column',
-      padding: '10px',
-      margin: '8px',
+      padding: '8px',
+      margin: 0,
       border: '1px solid #1f3c5e',
       borderRadius: '8px',
       background: '#0B1124',
@@ -797,10 +797,10 @@ export function ExpandableBullseye({
         <motion.div style={{ width: 6, height: 6, borderRadius: '50%', background: '#3a7fff', flexShrink: 0 }}
           animate={{ opacity:[1,0.3,1] }} transition={{ duration:1.5, repeat:Infinity }} />
         <p style={{ color: '#3a7fff', fontSize: 13, fontFamily: 'Azeret Mono, monospace', letterSpacing: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-          RADAR — {satellite?.name ?? 'NO TARGET'}
+          BULLSEYE — {satellite?.name ?? 'NO TARGET'}
         </p>
       </div>
-      <svg viewBox="-60 0 480 410" style={{ width: '100%', height: '100%', display: 'block' }}>
+      <svg viewBox="0 0 420 410" style={{ width: '100%', height: '100%', display: 'block' }}>
         {[R, R*0.75, R*0.5, R*0.25].map((r, i) => (
           <circle key={i} cx={CX} cy={CY} r={r} fill="none" stroke="#B3B3B3" strokeWidth="1" opacity={0.7} />
         ))}
@@ -860,15 +860,15 @@ export function ExpandableBullseye({
         })()}
           {satellite && (
             <g>
-              <rect x="-125" y="342" width="165" height="70" rx="5" fill="#0e1b2e" opacity="0.92" />
-              <text x="-36" y="357" fill="#8892a4" fontSize="9" fontFamily="Azeret Mono, monospace">Alt</text>
-              <text x="-36" y="370" fill="white" fontSize="12" fontFamily="Azeret Mono, monospace">{satellite.altitude}</text>
-              <text x="-120" y="357" fill="#8892a4" fontSize="9" fontFamily="Azeret Mono, monospace">Vel</text>
-              <text x="-120" y="370" fill="white" fontSize="12" fontFamily="Azeret Mono, monospace">{satellite.velocity}</text>
-              <text x="-36" y="389" fill="#8892a4" fontSize="9" fontFamily="Azeret Mono, monospace">Lat</text>
-              <text x="-36" y="402" fill="white" fontSize="12" fontFamily="Azeret Mono, monospace">{satellite.latitude}</text>
-              <text x="-120" y="389" fill="#8892a4" fontSize="9" fontFamily="Azeret Mono, monospace">Lon</text>
-              <text x="-120" y="402" fill="white" fontSize="12" fontFamily="Azeret Mono, monospace">{satellite.longitude}</text>
+              <rect x="12" y="334" width="170" height="72" rx="5" fill="#0e1b2e" opacity="0.92" />
+              <text x="20" y="350" fill="#8892a4" fontSize="9" fontFamily="Azeret Mono, monospace">Vel</text>
+              <text x="20" y="364" fill="white" fontSize="12" fontFamily="Azeret Mono, monospace">{satellite.velocity}</text>
+              <text x="106" y="350" fill="#8892a4" fontSize="9" fontFamily="Azeret Mono, monospace">Alt</text>
+              <text x="106" y="364" fill="white" fontSize="12" fontFamily="Azeret Mono, monospace">{satellite.altitude}</text>
+              <text x="20" y="384" fill="#8892a4" fontSize="9" fontFamily="Azeret Mono, monospace">Lon</text>
+              <text x="20" y="398" fill="white" fontSize="12" fontFamily="Azeret Mono, monospace">{satellite.longitude}</text>
+              <text x="106" y="384" fill="#8892a4" fontSize="9" fontFamily="Azeret Mono, monospace">Lat</text>
+              <text x="106" y="398" fill="white" fontSize="12" fontFamily="Azeret Mono, monospace">{satellite.latitude}</text>
             </g>
           )}
         </svg>

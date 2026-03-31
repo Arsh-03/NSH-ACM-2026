@@ -1102,7 +1102,7 @@ function BullseyeRadarInline({ satellite, debrisList }: {
   const CX = 210, CY = 205, R = 178;
   return (
     <div style={{
-  height: '100%',
+  height: 'auto',
   display: 'flex',
   flexDirection: 'column',
   padding: '10px',
@@ -1205,38 +1205,39 @@ function TelemetryStatsPanelInline({ satellite }: { satellite: Satellite | undef
   height: '100%',
   display: 'flex',
   flexDirection: 'column',
-  padding: '8px 10px 10px 10px',
+  padding: '6px 8px 7px 8px',
   margin: 0,
   border: '1px solid #1f3c5e',
   borderRadius:'8px',
   background: '#0A1124',
+  fontFamily: 'SF Compact Rounded, sans-serif',
   boxSizing: 'border-box',
   minHeight: 0,
 }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 6, background:'#0E1B2E' , marginBottom: 10, padding:5 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 5, background:'#0E1B2E' , marginBottom: 5, padding:'3px 5px' }}>
         <motion.div style={{ width: 6, height: 6, borderRadius: '50%', background: isAtRisk ? '#ff4444' : '#00ff88', flexShrink: 0 }}
           animate={{ opacity:[1,0.3,1] }} transition={{ duration:1.5, repeat:Infinity }} />
-        <p style={{ color: 'white', fontSize: 11, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+        <p style={{ color: '#d2d2d2', fontSize: 11, fontWeight: 600, lineHeight: 1.15, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
           Telemetry: {sat?.name ?? '— Select satellite'}
         </p>
-        {isAtRisk && <span style={{ marginLeft: 'auto', fontSize: 9, background: '#ff4444', color: 'white', padding: '2px 5px', borderRadius: 3, fontWeight: 700, flexShrink: 0 }}>{sat?.status}</span>}
+        {isAtRisk && <span style={{ marginLeft: 'auto', fontSize: 9, background: '#ff4444', color: 'white', padding: '1px 5px', borderRadius: 3, fontWeight: 700, flexShrink: 0 }}>{sat?.status}</span>}
       </div>
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '8px 12px', flex: 1 }}>
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '3px 5px', fontSize: 11, lineHeight: 1.08, alignContent: 'start', gridAutoRows: 'min-content', flex: '0 0 auto' }}>
         {[['Altitude',sat?.altitude??'—'],['Longitude',sat?.longitude??'—'],['Propellant',sat?.propellant??'—'],
           ['Latitude',sat?.latitude??'—'],['Velocity',sat?.velocity??'—'],['Status',sat?.status??'NOMINAL']
         ].map(([label,value])=>(
           <div key={label}>
-            <p style={{ color: '#444', fontSize: 9, marginBottom: 2 }}>{label}</p>
-            <p style={{ fontSize: 12, color: label==='Status'&&isAtRisk?'#ff4444':'white', fontWeight: 500 }}>{value}</p>
+            <p style={{ color: '#555', fontSize: 11, marginBottom: 1, lineHeight: 1.08 }}>{label}</p>
+            <p style={{ fontSize: 11, color: label==='Status'&&isAtRisk?'#ff4444':'white', lineHeight: 1.08 }}>{value}</p>
           </div>
         ))}
       </div>
-      <div style={{ marginTop: 10 }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 5 }}>
+      <div style={{ marginTop: 6 }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 3 }}>
           <p style={{ color: '#666', fontSize: 10 }}>Fuel Reserve</p>
           <p style={{ color: 'white', fontSize: 10 }}>{fuelPct.toFixed(0)}%</p>
         </div>
-        <div style={{ height: 5, background: '#1a2540', borderRadius: 3, overflow: 'hidden' }}>
+        <div style={{ height: 4, background: '#1a2540', borderRadius: 3, overflow: 'hidden' }}>
           <motion.div style={{ height: '100%', borderRadius: 3, background: fuelPct>50?'linear-gradient(to right,#00ff88,#00cc66)':fuelPct>20?'linear-gradient(to right,#ff8800,#ffaa00)':'linear-gradient(to right,#ff4444,#ff8800)' }}
             animate={{ width:`${fuelPct}%` }} transition={{ duration:1, ease:'easeOut' }} />
         </div>
@@ -1252,37 +1253,39 @@ function AlertPanelInline({ satellites }: { satellites: Satellite[] }) {
     <motion.div style={{ 
   height: '100%',
 
-  padding: '10px',
+  padding: '6px',
   margin: 0,
   border: alert ? '1px solid #ff4442' : '1px solid #1f3c5e',
   borderRadius:'8px',
   background: '#0A1124',
+  fontFamily: 'SF Compact Rounded, sans-serif',
   boxSizing: 'border-box',
   display: 'flex',
   flexDirection: 'column',
   minHeight: 0,
+  overflow: 'hidden',
 }}
       animate={{ boxShadow: alert?['0 0 6px rgba(255,68,66,0.15)','0 0 12px rgba(255,68,66,0.3)','0 0 6px rgba(255,68,66,0.15)']:'none' }}
       transition={{ duration:2, repeat: alert?Infinity:0 }}>
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8, }}>
-        <p style={{ color: '#d2d2d2', fontSize: 13, fontWeight: 600 }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4, }}>
+        <p style={{ color: '#d2d2d2', fontSize: 11, fontWeight: 600, lineHeight: 1.15 }}>
           {alert ? `⚠ ALERT: ${alert.name}` : '✓ All Systems Nominal'}
         </p>
-        <div style={{ border: `1px solid ${alert?'#ff4442':'#00ff88'}`, borderRadius: 4, padding: '2px 6px', flexShrink: 0 }}>
-          <p style={{ fontSize: 10, fontWeight: 700, color: alert?'#ff4442':'#00ff88' }}>{alert?alert.status:'NOMINAL'}</p>
+        <div style={{ border: `1px solid ${alert?'#ff4442':'#00ff88'}`, borderRadius: 4, padding: '1px 6px', flexShrink: 0 }}>
+          <p style={{ fontSize: 9, fontWeight: 700, color: alert?'#ff4442':'#00ff88' }}>{alert?alert.status:'NOMINAL'}</p>
         </div>
       </div>
       {alert ? (
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '5px 8px', fontSize: 12 }}>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '3px 5px', fontSize: 11, lineHeight: 1.08, overflowY: 'auto', minHeight: 0, flex: 1, paddingRight: 2, scrollbarWidth: 'thin', scrollbarColor: '#1f3c5e transparent' }}>
           <p style={{ color: '#555' }}>Satellite</p><p style={{ color: 'white' }}>{alert.name}</p>
           <p style={{ color: '#555' }}>Altitude</p><p style={{ color: 'white' }}>{alert.altitude}</p>
           <p style={{ color: '#555' }}>Fuel</p><p style={{ color: 'white' }}>{alert.propellant}</p>
           <p style={{ color: '#555' }}>Velocity</p><p style={{ color: 'white' }}>{alert.velocity}</p>
         </div>
       ) : (
-        <p style={{ color: '#2a2a3a', fontSize: 13 }}>No active conjunction threats detected.</p>
+        <p style={{ color: '#2a2a3a', fontSize: 11 }}>No active conjunction threats detected.</p>
       )}
-      {atRisk.length > 1 && <p style={{ color: '#ff8800', fontSize: 12, marginTop: 'auto', paddingTop: 6 }}>+{atRisk.length-1} more satellites at risk</p>}
+      {atRisk.length > 1 && <p style={{ color: '#ff8800', fontSize: 10, marginTop: 3, lineHeight: 1.05 }}>+{atRisk.length-1} more satellites at risk</p>}
     </motion.div>
   );
 }
@@ -1935,8 +1938,8 @@ export default function EnhancedDashboard() {
           gridColumn: 2,
           display: 'grid',
           gridTemplateRows: compactLayout
-            ? 'minmax(0, 1.35fr) minmax(0, 1fr) minmax(0, 1.65fr) minmax(0, 0.7fr)'
-            : 'minmax(0, 1.3fr) minmax(0, 1fr) minmax(0, 1.7fr) minmax(0, 0.75fr)',
+            ? 'minmax(0, 1.85fr) minmax(0, 1.45fr) minmax(0, 1fr)'
+            : 'minmax(0, 1.75fr) minmax(0, 1.5fr) minmax(0, 1.1fr)',
           overflow: 'hidden',
           minHeight: 0,
           background: '#07070f',
@@ -1945,17 +1948,18 @@ export default function EnhancedDashboard() {
           padding: 8,
           boxSizing: 'border-box',
         }}>
-          {/* Bullseye Radar — full width top */}
-          <div style={{ overflow: 'hidden', border: '1px solid #1a1a2e', minHeight: 0, borderRadius: 8 }}>
-            <ExpandableBullseye satellite={liveDataReady ? selectedSat : undefined} debrisList={liveDataReady ? debrisList : []} />
-          </div>
-          {/* Telemetry + Alerts side by side — bottom */}
-          <div style={{ display: 'grid', gridTemplateColumns: compactLayout ? '1fr' : '1fr 1fr', minHeight: 0, overflow: 'hidden', gap: 8 }}>
-            <div style={{ overflow: 'hidden', minHeight: 0, border: '1px solid #1a1a2e', borderRadius: 8 }}>
-              <TelemetryStatsPanelInline satellite={selectedSat} />
+          {/* Top module: radar left, telemetry + alert stacked right */}
+          <div style={{ display: 'grid', gridTemplateColumns: compactLayout ? 'minmax(0, 1.5fr) minmax(0, 1.05fr)' : 'minmax(0, 1.6fr) minmax(0, 1fr)', minHeight: 0, overflow: 'hidden', gap: 6, border: '1px solid #1a1a2e', borderRadius: 8, padding: 6, boxSizing: 'border-box' }}>
+            <div style={{ overflow: 'hidden', minHeight: 0, borderRadius: 8 }}>
+              <ExpandableBullseye satellite={liveDataReady ? selectedSat : undefined} debrisList={liveDataReady ? debrisList : []} />
             </div>
-            <div style={{ overflow: 'hidden', minHeight: 0, border: '1px solid #1a1a2e', borderRadius: 8 }}>
-              <AlertPanelInline satellites={tableRows} />
+            <div style={{ minHeight: 0, overflow: 'hidden', display: 'grid', gridTemplateRows: 'minmax(0, 0.55fr) minmax(0, 0.45fr)', gap: 6 }}>
+              <div style={{ overflow: 'hidden', minHeight: 0, border: '1px solid #1a1a2e', borderRadius: 8 }}>
+                <TelemetryStatsPanelInline satellite={selectedSat} />
+              </div>
+              <div style={{ overflow: 'hidden', minHeight: 0, border: '1px solid #1a1a2e', borderRadius: 8 }}>
+                <AlertPanelInline satellites={tableRows} />
+              </div>
             </div>
           </div>
           {/* Ground Track and Heatmap side by side */}
