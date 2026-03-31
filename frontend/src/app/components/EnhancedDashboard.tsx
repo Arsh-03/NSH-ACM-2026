@@ -177,14 +177,27 @@ function useLiveData() {
   const [counts,        setCounts]        = useState({ satellites:0, debris:0, at_risk:0 });
   const [connected,     setConnected]     = useState(false);
   const [istTime,       setIstTime]       = useState('--:--:--');
-  // liveDataReady: stays false until the SECOND WS message.
-  // The first message is the DB-seeded snapshot triggered by our own get_state;
-  // subsequent messages are real telemetry pushes from the backend/mock grader.
-  // Rendering with stale DB positions and then jumping to real positions causes
-  // the visible "satellite teleport" effect — we suppress the map until ready.
   const [liveDataReady, setLiveDataReady] = useState(false);
-  const wsRef          = useRef<WebSocket | null>(null);
-  const msgCountRef    = useRef<number>(0); // counts WS messages received this connection
+  const wsRef = useRef<WebSocket | null>(null);
+
+  // ── Stability tracking ─────────────────────────────────────────────────────
+  // The mock grader init loop posts 50 satellites one-by-one. The backend
+  // broadcasts a state_update after EACH post, so early messages carry
+  // partially-populated fleets (e.g. 1 real + 49 stale DB positions).
+  //
+  // Strategy: buffer every incoming update but only commit to React state
+  // (and flip liveDataReady) once the satellite count has been the SAME
+  // for STABLE_COUNT_HITS_REQUIRED consecutive messages AND ≥ MIN_SAT_COUNT.
+  // This waits for the entire init loop to settle before showing anything.
+  //
+  // "Same count" is the stability signal: the count grows during init,
+  // then plateaus. That plateau = all satellites registered = safe to render.
+  const prevSatCountRef   = useRef<number>(-1);  // last seen satellite count
+  const stableHitsRef     = useRef<number>(0);   // consecutive same-count ticks
+  const pendingSatsRef    = useRef<LiveSat[]>([]);
+  const pendingDebrisRef  = useRef<{id:string;r:number[];v:number[]}[]>([]);
+  const STABLE_COUNT_HITS = 3;   // messages in a row with same count → stable
+  const MIN_SAT_COUNT     = 5;   // ignore tiny fleets (e.g. first 1-2 messages)
 
   useEffect(() => {
     const clock = setInterval(() => {
@@ -197,46 +210,57 @@ function useLiveData() {
     }, 1000);
 
     const connect = () => {
-      msgCountRef.current = 0; // reset on each new connection
+      // Reset stability state on reconnect
+      prevSatCountRef.current  = -1;
+      stableHitsRef.current    = 0;
+      pendingSatsRef.current   = [];
+      pendingDebrisRef.current = [];
+
       const ws = new WebSocket(`ws://${window.location.hostname}:8000/ws`);
       wsRef.current = ws;
-      ws.onopen  = () => { setConnected(true); ws.send(JSON.stringify({type:'get_state'})); };
+      ws.onopen = () => { setConnected(true); ws.send(JSON.stringify({type:'get_state'})); };
+
       ws.onmessage = (e) => {
         try {
           const msg = JSON.parse(e.data);
           if (msg.type === 'state_update') {
-            msgCountRef.current += 1;
+            const incomingSats  = msg.satellites || [];
+            const compact       = msg.debris_compact || [];
+            const satCount      = incomingSats.length;
 
-            // Message #1 = the get_state response seeded from the DB snapshot.
-            // We consume it for counts but do NOT expose it as satellite positions
-            // so the map stays blank instead of snapping to stale DB coordinates.
-            // Message #2+ = real telemetry: accept everything and mark as ready.
-            if (msgCountRef.current === 1) {
-              // Still update counts so the header shows satellite numbers
-              setCounts({
-                satellites: msg.sat_count || (msg.satellites || []).length,
-                debris:     msg.debris_count || (msg.debris_compact || []).length,
-                at_risk:    (msg.satellites||[]).filter((s:LiveSat) =>
-                  s.status==='AT_RISK'||s.status==='MANEUVERING').length,
-              });
-              // Do NOT call setSatellites — leave map empty until real data arrives.
-              return;
-            }
-
-            // Real telemetry — set everything and mark data as ready
-            setSatellites(msg.satellites || []);
-            const compact = msg.debris_compact || [];
-            setDebrisList(compact.map((d: any) => ({
-              id: d[0],
-              r: [d[1], d[2], d[3]]
-            })));
+            // Always update the header counts (cheap, always visible)
             setCounts({
-              satellites: msg.sat_count || (msg.satellites || []).length,
+              satellites: msg.sat_count || satCount,
               debris:     msg.debris_count || compact.length,
-              at_risk:    (msg.satellites||[]).filter((s:LiveSat) =>
+              at_risk:    incomingSats.filter((s:LiveSat) =>
                 s.status==='AT_RISK'||s.status==='MANEUVERING').length,
             });
-            if (!liveDataReady) setLiveDataReady(true);
+
+            // Buffer the latest payload — we'll commit it once stable
+            pendingSatsRef.current = incomingSats;
+            if (compact.length > 0) {
+              pendingDebrisRef.current = compact.map((d: any) => ({
+                id: d[0], r: [d[1], d[2], d[3]]
+              }));
+            }
+
+            // ── Count-stability check ─────────────────────────────────────
+            if (satCount === prevSatCountRef.current && satCount >= MIN_SAT_COUNT) {
+              stableHitsRef.current += 1;
+            } else {
+              // Count changed (still growing during init) — reset hits
+              stableHitsRef.current = 0;
+            }
+            prevSatCountRef.current = satCount;
+
+            // Commit to React state once stable (or keep updating if already stable)
+            if (stableHitsRef.current >= STABLE_COUNT_HITS) {
+              setSatellites(pendingSatsRef.current);
+              if (pendingDebrisRef.current.length > 0) {
+                setDebrisList(pendingDebrisRef.current);
+              }
+              setLiveDataReady(true);
+            }
           }
         } catch(_){}
       };
@@ -258,6 +282,7 @@ function useLiveData() {
 
   return { satellites, debrisList, counts, connected, istTime, liveDataReady };
 }
+
 
 // ── Three.js Globe ───────────────────────────────────────────────────────────
 export function GlobeView({
