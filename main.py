@@ -97,6 +97,7 @@ async def _send_state(websocket: WebSocket):
                 "fuel": float(data.get("fuel_mass", 50.0)),
                 "status": str(data.get("status", "NOMINAL")),
                 "last_burn": float(data.get("last_burn", 0)),
+                "lastUpdate": float(data.get("last_update", 0)),
                 "type": "SATELLITE"
             })
         elif data.get("type") == "DEBRIS":

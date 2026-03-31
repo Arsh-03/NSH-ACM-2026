@@ -15,6 +15,7 @@ import svgPaths from "../../imports/svg-2gbe90s142";
 interface LiveSat {
   id: string; r: number[]; v: number[];
   fuel: number; status: string; type: string;
+  lastUpdate: number;
 }
 
 interface TrackPoint {
@@ -192,12 +193,11 @@ function useLiveData() {
   //
   // "Same count" is the stability signal: the count grows during init,
   // then plateaus. That plateau = all satellites registered = safe to render.
-  const prevSatCountRef   = useRef<number>(-1);  // last seen satellite count
-  const stableHitsRef     = useRef<number>(0);   // consecutive same-count ticks
+  const prevStaleCountRef = useRef<number | null>(null);
+  const stableHitsRef     = useRef<number>(0);
+  const firstMsgTimeRef   = useRef<number | null>(null);
   const pendingSatsRef    = useRef<LiveSat[]>([]);
   const pendingDebrisRef  = useRef<{id:string;r:number[];v:number[]}[]>([]);
-  const STABLE_COUNT_HITS = 3;   // messages in a row with same count → stable
-  const MIN_SAT_COUNT     = 5;   // ignore tiny fleets (e.g. first 1-2 messages)
 
   useEffect(() => {
     const clock = setInterval(() => {
@@ -211,10 +211,11 @@ function useLiveData() {
 
     const connect = () => {
       // Reset stability state on reconnect
-      prevSatCountRef.current  = -1;
-      stableHitsRef.current    = 0;
-      pendingSatsRef.current   = [];
-      pendingDebrisRef.current = [];
+      prevStaleCountRef.current = null;
+      stableHitsRef.current     = 0;
+      firstMsgTimeRef.current   = null;
+      pendingSatsRef.current    = [];
+      pendingDebrisRef.current  = [];
 
       const ws = new WebSocket(`ws://${window.location.hostname}:8000/ws`);
       wsRef.current = ws;
@@ -244,22 +245,48 @@ function useLiveData() {
               }));
             }
 
-            // ── Count-stability check ─────────────────────────────────────
-            if (satCount === prevSatCountRef.current && satCount >= MIN_SAT_COUNT) {
-              stableHitsRef.current += 1;
-            } else {
-              // Count changed (still growing during init) — reset hits
-              stableHitsRef.current = 0;
-            }
-            prevSatCountRef.current = satCount;
+            // ── Fleet freshness check (Definitive 'live' signal) ─────────────
+            // We only flip liveDataReady=true once the mock grader has finished
+            // its initial population loop. We detect this by checking if every
+            // sat is fresh, OR if the stale count has plateaued.
+            const nowSeconds   = Date.now() / 1000;
+            const freshSats    = incomingSats.filter((s: LiveSat) => (nowSeconds - s.lastUpdate) < 30);
+            const staleCount   = incomingSats.length - freshSats.length;
 
-            // Commit to React state once stable (or keep updating if already stable)
-            if (stableHitsRef.current >= STABLE_COUNT_HITS) {
+            if (firstMsgTimeRef.current === null) {
+              firstMsgTimeRef.current = nowSeconds;
+            }
+
+            // Track if the stale count is still dropping (grader still working)
+            if (staleCount < (prevStaleCountRef.current ?? 9999)) {
+              stableHitsRef.current = 0;
+            } else if (incomingSats.length > 0) {
+              stableHitsRef.current += 1;
+            }
+            prevStaleCountRef.current = staleCount;
+
+            const isStable = stableHitsRef.current >= 4;
+            const hasData  = freshSats.length >= 5;
+            const timeout  = (nowSeconds - (firstMsgTimeRef.current || 0)) > 12;
+
+            // Switch to LIVE if everyone is fresh, plateaued, or timeout reached
+            if (staleCount === 0 || (isStable && hasData) || timeout) {
+              if (timeout && !liveDataReady) {
+                console.warn(`[TELEMETRY] Failsafe triggered — forcing map load (Stale: ${staleCount})`);
+              }
               setSatellites(pendingSatsRef.current);
               if (pendingDebrisRef.current.length > 0) {
                 setDebrisList(pendingDebrisRef.current);
               }
               setLiveDataReady(true);
+            } else if (!liveDataReady) {
+              console.log(`[TELEMETRY] Population loop active... (Fresh: ${freshSats.length}, Stale: ${staleCount}, Stable: ${stableHitsRef.current})`);
+            } else {
+              // Already live? Keep updating normally.
+              setSatellites(pendingSatsRef.current);
+              if (pendingDebrisRef.current.length > 0) {
+                setDebrisList(pendingDebrisRef.current);
+              }
             }
           }
         } catch(_){}
