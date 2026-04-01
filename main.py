@@ -109,7 +109,7 @@ async def _send_state(websocket: WebSocket):
     # We use the most recent satellite update timestamp as the authoritative
     # 'sim_time'. This ensures the frontend's GMST calculation stays perfectly
     # in sync with the backend's integrator clock, eliminating longitudinal drift.
-    authoritative_ts = max((s["lastUpdate"] for s in satellites), default=time.time())
+    authoritative_ts = time.time()
 
     payload = {
         "type": "state_update",

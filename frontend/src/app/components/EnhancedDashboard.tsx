@@ -181,6 +181,10 @@ function useLiveData() {
   const [serverTime,    setServerTime]    = useState<number>(Date.now() / 1000);
   const [istTime,       setIstTime]       = useState('--:--:--');
   const [liveDataReady, setLiveDataReady] = useState(false);
+  
+  // Track the offset between browser clock and backend simulation time
+  const clockSkewRef = useRef<number>(0);
+  const [currentSimTime, setCurrentSimTime] = useState<number>(Date.now() / 1000);
   const wsRef = useRef<WebSocket | null>(null);
 
   // ── Stability tracking ─────────────────────────────────────────────────────
@@ -203,8 +207,16 @@ function useLiveData() {
 
   useEffect(() => {
     const clock = setInterval(() => {
-      // The istTime in the UI is just for visual reference.
-      // We update it from the latest serverTime if we are live.
+      const now = Date.now() / 1000;
+      const sim = now + clockSkewRef.current;
+      setCurrentSimTime(sim);
+
+      const ist = new Date(sim * 1000 + 5.5 * 3600000);
+      setIstTime(
+        `${String(ist.getUTCHours()).padStart(2,'0')}:` +
+        `${String(ist.getUTCMinutes()).padStart(2,'0')}:` +
+        `${String(ist.getUTCSeconds()).padStart(2,'0')}`
+      );
     }, 1000);
 
     const connect = () => {
@@ -229,12 +241,8 @@ function useLiveData() {
 
             if (msg.timestamp) {
               setServerTime(msg.timestamp);
-              const ist = new Date(msg.timestamp * 1000 + 5.5 * 3600000);
-              setIstTime(
-                `${String(ist.getUTCHours()).padStart(2,'0')}:` +
-                `${String(ist.getUTCMinutes()).padStart(2,'0')}:` +
-                `${String(ist.getUTCSeconds()).padStart(2,'0')}`
-              );
+              // Calculate skew: Server - Browser
+              clockSkewRef.current = msg.timestamp - (Date.now() / 1000);
             }
 
             // Always update the header counts (cheap, always visible)
@@ -315,7 +323,7 @@ function useLiveData() {
     return () => { clearInterval(clock); clearInterval(poll); wsRef.current?.close(); };
   }, []);
 
-  return { satellites, debrisList, counts, connected, serverTime, istTime, liveDataReady };
+  return { satellites, debrisList, counts, connected, serverTime, currentSimTime, istTime, liveDataReady };
 }
 
 
@@ -2435,7 +2443,7 @@ function FuelCollisionGraph({ tableRows }: { tableRows: Satellite[] }) {
 
 // ── Main Dashboard ────────────────────────────────────────────────────────────
 export default function EnhancedDashboard() {
-  const { satellites: liveSats, debrisList, counts, connected, istTime, liveDataReady } = useLiveData();
+  const { satellites: liveSats, debrisList, counts, connected, serverTime, currentSimTime, istTime, liveDataReady } = useLiveData();
   const [selectedId,  setSelectedId]  = useState<string>('');
   const MAP_DEBRIS_RANGE_KM = 500;
 
@@ -2486,8 +2494,8 @@ export default function EnhancedDashboard() {
   ? '48px minmax(0, 2.3fr) minmax(0, 1.35fr) minmax(0, 1.15fr)'
   : '48px minmax(0, 2.2fr) minmax(0, 1.45fr) minmax(0, 1.2fr)';
 
-  const now = new Date();
-  const tableRows = liveSats.map((sat) => satToRow(sat, debrisList, now));
+  const simDate = new Date(currentSimTime * 1000);
+  const tableRows = liveSats.map((sat) => satToRow(sat, debrisList, simDate));
   const selectedSat = tableRows.find(s => s.id === selectedId) || tableRows[0];
 
   // Auto-open first satellite tab when data first arrives (one-time bootstrap only)

@@ -305,8 +305,8 @@ export function useOrbitalSimulation({
   // Whether history has been seeded for each satellite
   const seededRef        = useRef<Set<string>>(new Set());
   // Anchors the simulation to the latest authoritative backend clock
-  const lastServerTimeRef = useRef<number>(serverTime || Date.now() / 1000);
-  const lastWallTimeRef   = useRef<number>(Date.now());
+  const simTimeRef        = useRef<number>(serverTime || Date.now() / 1000);
+  const lastUpdateRef     = useRef<number>(serverTime);
   const selectedIdRef     = useRef<string>(selectedId);
   selectedIdRef.current  = selectedId;
 
@@ -314,9 +314,7 @@ export function useOrbitalSimulation({
   const regeneratePrediction = useCallback(() => {
     const sel = simRef.current.get(selectedIdRef.current);
     if (sel?.r?.length === 3 && sel?.v?.length === 3) {
-      const wallClock = Date.now();
-      const simTime   = lastServerTimeRef.current + (wallClock - lastWallTimeRef.current) / 1000;
-      const pts = propagateN(sel.r, sel.v, PREDICT_DT_S, PREDICT_STEPS, simTime * 1000);
+      const pts = propagateN(sel.r, sel.v, PREDICT_DT_S, PREDICT_STEPS, simTimeRef.current * 1000);
       const current: PredictPoint = { lat: sel.lat, lon: sel.lon };
       setPrediction([current, ...pts]);
     }
@@ -330,9 +328,11 @@ export function useOrbitalSimulation({
   useEffect(() => {
     const sim = simRef.current;
     
-    // Update authoritative clock anchor
-    lastServerTimeRef.current = serverTime;
-    lastWallTimeRef.current   = Date.now();
+    // Snap to server clock on message arrival (prevents drift over hours)
+    if (serverTime !== lastUpdateRef.current) {
+      simTimeRef.current    = serverTime;
+      lastUpdateRef.current = serverTime;
+    }
 
     liveSats.forEach((ls) => {
       if (!ls.r?.length || !ls.v?.length) return;
@@ -352,16 +352,14 @@ export function useOrbitalSimulation({
           regeneratePrediction();
         }
 
-        const simTime = lastServerTimeRef.current + (Date.now() - lastWallTimeRef.current) / 1000;
-        const geo = eciToGeo(existing.r, getGmstRad(simTime * 1000));
+        const geo = eciToGeo(existing.r, getGmstRad(simTimeRef.current * 1000));
         existing.lat = geo.lat;
         existing.lon = geo.lon;
         existing.alt = geo.alt;
       } else {
         // First time we see this satellite — MapViewPanel was just remounted
         // with real positions so we seed history immediately.
-        const simTime = lastServerTimeRef.current + (Date.now() - lastWallTimeRef.current) / 1000;
-        const geo = eciToGeo(ls.r, getGmstRad(simTime * 1000));
+        const geo = eciToGeo(ls.r, getGmstRad(simTimeRef.current * 1000));
         const newSat: SimSatellite = {
           id:      ls.id,
           status:  ls.status,
@@ -379,8 +377,7 @@ export function useOrbitalSimulation({
         };
 
         if (!seededRef.current.has(ls.id) && ls.r.length === 3 && ls.v.length === 3) {
-          const simTime = lastServerTimeRef.current + (Date.now() - lastWallTimeRef.current) / 1000;
-          newSat.history = seedHistory(ls.r, ls.v, simTime * 1000);
+          newSat.history = seedHistory(ls.r, ls.v, simTimeRef.current * 1000);
           seededRef.current.add(ls.id);
         }
         sim.set(ls.id, newSat);
@@ -410,10 +407,9 @@ export function useOrbitalSimulation({
       const dt_s      = Math.min(dt_ms / 1000, MAX_DT_S);
       lastTimeRef.current = now;
 
-      // Current authoritative simulation time (interpolated)
-      const wallClock = Date.now();
-      const simTime   = lastServerTimeRef.current + (wallClock - lastWallTimeRef.current) / 1000;
-      const gmstRad   = getGmstRad(simTime * 1000);
+      // Increment simulation clock by frame delta
+      simTimeRef.current += dt_s;
+      const gmstRad   = getGmstRad(simTimeRef.current * 1000);
       const sim       = simRef.current;
 
       // ── Update every satellite position ───────────────────────────────────
@@ -484,8 +480,7 @@ export function useOrbitalSimulation({
       ) {
         const sel = sim.get(selectedIdRef.current);
         if (sel?.r?.length === 3 && sel?.v?.length === 3) {
-          const simTime = lastServerTimeRef.current + (Date.now() - lastWallTimeRef.current) / 1000;
-          const pts = propagateN(sel.r, sel.v, PREDICT_DT_S, PREDICT_STEPS, simTime * 1000);
+          const pts = propagateN(sel.r, sel.v, PREDICT_DT_S, PREDICT_STEPS, simTimeRef.current * 1000);
           // Include current position as first point so path starts at marker
           const current: PredictPoint = { lat: sel.lat, lon: sel.lon };
           setPrediction([current, ...pts]);
@@ -515,8 +510,7 @@ export function useOrbitalSimulation({
 
     const sel = simRef.current.get(selectedId);
     if (sel?.r?.length === 3 && sel?.v?.length === 3) {
-      const simTime = lastServerTimeRef.current + (Date.now() - lastWallTimeRef.current) / 1000;
-      const pts = propagateN(sel.r, sel.v, PREDICT_DT_S, PREDICT_STEPS, simTime * 1000);
+      const pts = propagateN(sel.r, sel.v, PREDICT_DT_S, PREDICT_STEPS, simTimeRef.current * 1000);
       setPrediction([{ lat: sel.lat, lon: sel.lon }, ...pts]);
     } else {
       setPrediction([]);
@@ -525,7 +519,7 @@ export function useOrbitalSimulation({
 
   return {
     tick,
-    simTime: lastServerTimeRef.current + (Date.now() - lastWallTimeRef.current) / 1000,
+    simTime: simTimeRef.current,
     simRef,
     prediction,
     satIds: Array.from(simRef.current.keys()),
