@@ -46,10 +46,23 @@ nsh-acm-2026/
 
 ## 🚀 Getting Started
 
-### 1. Backend Setup
-Activate the virtual environment and start the FastAPI server.
-```powershell
+### 1. Environment & Backend Setup
+Create and activate the virtual environment (Python 3.10+ recommended) and install dependencies.
+
+```bash
+# 1. Create the virtual environment (if not already present)
+python -m venv .venv
+
+# 2. Activate the environment
+# On Windows:
 .venv\Scripts\activate
+# On macOS/Linux:
+source .venv/bin/activate
+
+# 3. Install required packages
+pip install -r requirements.txt
+
+# 4. Start the FastAPI server
 python main.py
 ```
 *Backend runs at `http://localhost:8000`*
