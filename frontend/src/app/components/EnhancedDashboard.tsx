@@ -1770,9 +1770,7 @@ function ManeuverTimelineModule({ selectedId, satellites }: { selectedId?: strin
     return [...normalizedExecuted, ...normalizedPending];
   }, [pending, executed]);
 
-  const sourceItems: TimelineEvent[] = normalizedApiItems.length > 0
-    ? normalizedApiItems
-    : synthesizedFromStatus;
+  const sourceItems: TimelineEvent[] = [...normalizedApiItems, ...synthesizedFromStatus];
 
   const all = sourceItems
     .sort((a, b) => Number(a.burn_start) - Number(b.burn_start))
@@ -1782,10 +1780,12 @@ function ManeuverTimelineModule({ selectedId, satellites }: { selectedId?: strin
   const pendingCount  = sourceItems.filter((m) => m.status === 'PENDING').length;
   const executedCount = sourceItems.filter((m) => m.status === 'EXECUTED').length;
 
+  const isNextOrCurrent = (m: TimelineEvent) => (m.status === 'PENDING' || (Number(m.burn_start) <= now && Number(m.burn_end) >= now)) && Number(m.burn_end) >= now;
+
   const nextSelectedBurn = selectedId
-    ? all.find((m) => m.satellite_id === selectedId && m.status === 'PENDING' && Number(m.burn_start) >= now)
+    ? sourceItems.find((m) => m.satellite_id === selectedId && isNextOrCurrent(m))
     : null;
-  const nextGlobalBurn = all.find((m) => m.status === 'PENDING' && Number(m.burn_start) >= now);
+  const nextGlobalBurn = sourceItems.find(isNextOrCurrent);
 
   const etaLabel = (event: any | null) => {
     if (!event) return 'none';
@@ -2516,18 +2516,24 @@ export default function EnhancedDashboard() {
   const handleSatelliteClick = useCallback((id: string, ctrlOpen = false) => {
     if (!tableRows.some(s => s.id === id)) return;
 
-    // Always update selection — refreshes telemetry panel, bullseye radar,
-    // ground-track highlight, 3D orbit overlay, and heatmap selection marker
-    setSelectedId(id);
-
     if (ctrlOpen) {
-      // Ctrl/Cmd + click: open in tab (no-op if tab already exists → just selects)
-      setOpenTabIds(prev =>
-        prev.includes(id) ? prev : [...prev, id]
-      );
+      // Ctrl/Cmd + click: Always open as a NEW tab/pin
+      setOpenTabIds(prev => (prev.includes(id) ? prev : [...prev, id]));
+    } else {
+      // Normal click: Reuse the CURRENT active tab for the new selection
+      setOpenTabIds(prev => {
+        if (prev.includes(id)) return prev;
+        const currentIdx = prev.indexOf(selectedId);
+        if (currentIdx !== -1) {
+          const next = [...prev];
+          next[currentIdx] = id;
+          return next;
+        }
+        return [id];
+      });
     }
-    // Normal click: selection updated above, no tab mutation
-  }, [tableRows]);
+    setSelectedId(id);
+  }, [tableRows, selectedId]);
 
   const activeTabs = openTabIds
     .map(id => tableRows.find(s => s.id === id))

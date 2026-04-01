@@ -57,31 +57,50 @@ def _ecef_from_geodetic(lat_rad: float, lon_rad: float, alt_km: float) -> np.nda
     ])
 
 
-def elevation_angle(gs_pos: np.ndarray, sat_pos: np.ndarray) -> float:
-    gs_to_sat = sat_pos - gs_pos
-    nadir     = -gs_pos / (np.linalg.norm(gs_pos) + 1e-12)
+def elevation_angle(gs_pos_ecef: np.ndarray, sat_pos_ecef: np.ndarray) -> float:
+    gs_to_sat = sat_pos_ecef - gs_pos_ecef
+    nadir     = -gs_pos_ecef / (np.linalg.norm(gs_pos_ecef) + 1e-12)
     cos_angle = np.dot(gs_to_sat, -nadir) / (np.linalg.norm(gs_to_sat) + 1e-12)
     cos_angle = np.clip(cos_angle, -1.0, 1.0)
     zenith    = np.arccos(cos_angle)
     return (np.pi / 2.0) - zenith
 
 
-def is_in_blackout(sat_pos_eci, csv_path: str = _CSV_PATH) -> Tuple[bool, str]:
+def is_in_blackout(sat_pos_eci, timestamp: float = 0.0, csv_path: str = _CSV_PATH) -> Tuple[bool, str]:
     """
     Returns (blackout: bool, reason: str).
-    Safe against malformed CSV — returns False (not in blackout) on any error.
+    Accounts for Earth rotation to transform ECI satellite position to ECEF for 
+    Line-of-Sight checks against ground stations.
     """
     try:
-        sat_pos = np.array(sat_pos_eci)
+        sat_pos_eci = np.array(sat_pos_eci)
         stations = _load_stations(csv_path)
 
         if not stations:
             return False, "No stations loaded — assuming contact"
 
+        # ── ECI to ECEF Rotation ─────────────────────────────────────────────
+        # Omega = ~7.292115e-5 rad/s
+        omega = 7.2921151467e-5
+        theta = omega * timestamp
+        
+        cos_t = np.cos(theta)
+        sin_t = np.sin(theta)
+        
+        # Rotation matrix around Z-axis
+        # [ x_ecef ]   [  cos(theta)  sin(theta)  0 ] [ x_eci ]
+        # [ y_ecef ] = [ -sin(theta)  cos(theta)  0 ] [ y_eci ]
+        # [ z_ecef ]   [      0           0       1 ] [ z_eci ]
+        sat_pos_ecef = np.array([
+            sat_pos_eci[0] * cos_t + sat_pos_eci[1] * sin_t,
+           -sat_pos_eci[0] * sin_t + sat_pos_eci[1] * cos_t,
+            sat_pos_eci[2]
+        ])
+
         visible = []
         for gs in stations:
             gs_pos = _ecef_from_geodetic(gs["lat_rad"], gs["lon_rad"], gs["elev_km"])
-            el     = elevation_angle(gs_pos, sat_pos)
+            el     = elevation_angle(gs_pos, sat_pos_ecef)
             if el >= gs["min_el"]:
                 visible.append(gs["name"])
 
@@ -90,18 +109,28 @@ def is_in_blackout(sat_pos_eci, csv_path: str = _CSV_PATH) -> Tuple[bool, str]:
         return False, f"Visible via: {', '.join(visible)}"
 
     except Exception as e:
-        # Never crash the auto-pilot due to blackout check failure
         return False, f"Blackout check error (assuming contact): {e}"
 
 
-def get_visible_stations(sat_pos_eci, csv_path: str = _CSV_PATH) -> List[dict]:
+def get_visible_stations(sat_pos_eci, timestamp: float = 0.0, csv_path: str = _CSV_PATH) -> List[dict]:
     try:
-        sat_pos  = np.array(sat_pos_eci)
+        sat_pos_eci = np.array(sat_pos_eci)
         stations = _load_stations(csv_path)
+        
+        omega = 7.2921151467e-5
+        theta = omega * timestamp
+        cos_t, sin_t = np.cos(theta), np.sin(theta)
+        
+        sat_pos_ecef = np.array([
+            sat_pos_eci[0] * cos_t + sat_pos_eci[1] * sin_t,
+           -sat_pos_eci[0] * sin_t + sat_pos_eci[1] * cos_t,
+            sat_pos_eci[2]
+        ])
+        
         result   = []
         for gs in stations:
             gs_pos = _ecef_from_geodetic(gs["lat_rad"], gs["lon_rad"], gs["elev_km"])
-            el_rad = elevation_angle(gs_pos, sat_pos)
+            el_rad = elevation_angle(gs_pos, sat_pos_ecef)
             result.append({
                 "id":      gs["id"],
                 "name":    gs["name"],
