@@ -64,7 +64,8 @@ interface MapViewPanelProps {
   satellites: DashboardSatellite[];
   debrisList: { id: string; r: number[] }[];
   selectedId: string;
-  onSelect: (id: string) => void;
+  // ctrlOpen = true when Ctrl/Cmd was held on click → open in new tab
+  onSelect: (id: string, ctrlOpen?: boolean) => void;
   debrisFilterKm?: number;
 }
 
@@ -320,7 +321,8 @@ interface SatelliteMarkerProps {
   status: string;
   isSelected: boolean;
   anySelected: boolean;
-  onClick: (id: string) => void;
+  // ctrlOpen = true when Ctrl/Cmd key was held during the click
+  onClick: (id: string, ctrlOpen?: boolean) => void;
 }
 
 const SatelliteMarker = memo(function SatelliteMarker({
@@ -348,11 +350,13 @@ const SatelliteMarker = memo(function SatelliteMarker({
     }}>
       {hovered && <SatelliteTooltip sat={{ id, lat, lon, alt, fuel, status } as any} />}
 
+      {/* title tooltip: visible on hover, explains Ctrl+Click shortcut */}
       <button
-        onClick={() => onClick(id)}
+        onClick={(e) => onClick(id, e.ctrlKey || e.metaKey)}
         onMouseEnter={() => setHovered(true)}
         onMouseLeave={() => setHovered(false)}
         aria-label={`Select satellite ${id}`}
+        title="Click to select · Ctrl+Click to open in new tab"
         style={{
           background: 'none', border: 'none', cursor: 'pointer',
           padding: 6, margin: -6,
@@ -410,7 +414,8 @@ const SatelliteMarker = memo(function SatelliteMarker({
 interface SatelliteMarkersProps {
   sats: SimSatellite[];
   mapSelectedId: string | null;
-  onMarkerClick: (id: string) => void;
+  // ctrlOpen propagated from individual SatelliteMarker click events
+  onMarkerClick: (id: string, ctrlOpen?: boolean) => void;
 }
 
 const SatelliteMarkers = memo(function SatelliteMarkers({
@@ -430,7 +435,7 @@ const SatelliteMarkers = memo(function SatelliteMarkers({
           status={sat.status}
           isSelected={sat.id === mapSelectedId}
           anySelected={anySelected}
-          onClick={onMarkerClick}
+          onClick={(id, ctrlOpen) => onMarkerClick(id, ctrlOpen)}
         />
       ))}
     </>
@@ -457,7 +462,7 @@ interface GroundTrackMapProps {
   liveSats: LiveSatInput[];
   debrisList: { id: string; r: number[] }[];
   selectedId: string;
-  onSelect: (id: string) => void;
+  onSelect: (id: string, ctrlOpen?: boolean) => void;
 }
 
 function GroundTrackMap({ liveSats, debrisList, selectedId, onSelect }: GroundTrackMapProps) {
@@ -470,9 +475,12 @@ function GroundTrackMap({ liveSats, debrisList, selectedId, onSelect }: GroundTr
     setMapSelectedId(selectedId || null);
   }, [selectedId]);
 
-  const handleMarkerClick = useCallback((id: string) => {
+  // handleMarkerClick — called by SatelliteMarkers with optional ctrlOpen flag.
+  // Normal click  → update local trail highlight + bubble up (no tab open).
+  // Ctrl/Cmd click → same, but ctrlOpen=true tells parent to open a new tab.
+  const handleMarkerClick = useCallback((id: string, ctrlOpen = false) => {
     setMapSelectedId(id);
-    onSelect(id);
+    onSelect(id, ctrlOpen);
   }, [onSelect]);
 
   // ── SIMULATION HOOK — the RAF engine ──────────────────────────────────────
@@ -610,12 +618,12 @@ function GroundTrackMap({ liveSats, debrisList, selectedId, onSelect }: GroundTr
             </span>
           </div>
         ))}
-        {!mapSelectedId && (
-          <div style={{ marginTop:4, paddingTop:5, borderTop:'1px solid rgba(58,127,255,0.12)',
-            color:'rgba(136,146,164,0.65)', fontSize:7.5, fontFamily:'Azeret Mono, monospace', letterSpacing:0.3 }}>
-            CLICK SATELLITE TO FOCUS
-          </div>
-        )}
+        <div style={{ marginTop:4, paddingTop:5, borderTop:'1px solid rgba(58,127,255,0.12)',
+          color:'rgba(136,146,164,0.65)', fontSize:7.5, fontFamily:'Azeret Mono, monospace', letterSpacing:0.3,
+          display:'flex', flexDirection:'column', gap:2 }}>
+          {!mapSelectedId && <span>CLICK SATELLITE TO FOCUS</span>}
+          <span>CTRL+CLICK TO OPEN IN TAB</span>
+        </div>
       </div>
 
       {/* Border */}

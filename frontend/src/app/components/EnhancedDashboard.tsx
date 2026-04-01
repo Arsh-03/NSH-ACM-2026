@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
+import { BarChart, Bar, XAxis, YAxis, Tooltip as RechartsTooltip, ResponsiveContainer, CartesianGrid } from 'recharts';
 import { motion, AnimatePresence } from 'motion/react';
 import * as Tooltip from '@radix-ui/react-tooltip';
 import { SatelliteTabs } from './SatelliteTabs';
@@ -318,7 +319,8 @@ export function GlobeView({
   satellites: Satellite[];
   debrisList: {id:string; r:number[]}[];
   selectedId: string;
-  onSelect: (id: string) => void;
+  // ctrlOpen: true when Ctrl/Cmd was held — parent decides whether to open a new tab
+  onSelect: (id: string, ctrlOpen?: boolean) => void;
 }) {
   const mountRef    = useRef<HTMLDivElement>(null);
   const sceneRef    = useRef<any>(null);
@@ -764,6 +766,8 @@ export function GlobeView({
 };
 
   // Click to select satellite
+  // Normal click → select only (no new tab)
+  // Ctrl/Cmd + click → open in new tab (handled by parent via ctrlKey flag)
   const onCanvasClick = (e: React.MouseEvent) => {
     if (!THREE || !cameraRef.current || !groupRef.current) return;
     const el = mountRef.current!;
@@ -778,7 +782,11 @@ export function GlobeView({
     const hits = raycaster.intersectObjects(meshes);
     if (hits.length > 0) {
       const id = hits[0].object.userData.satId;
-      if (id) onSelect(id);
+      if (id) {
+        // Pass ctrlKey (Windows/Linux) or metaKey (Mac) flag to parent
+        const isCtrl = e.ctrlKey || e.metaKey;
+        onSelect(id, isCtrl);
+      }
     }
   };
 
@@ -842,6 +850,10 @@ export function GlobeView({
         minWidth: 138,
       }}>
         <div style={{ color: '#7f94b4', fontSize: 8, letterSpacing: 1.1 }}>3D GUIDE</div>
+        <div style={{ color: 'rgba(136,146,164,0.65)', fontSize: 7.5, letterSpacing: 0.3,
+          borderBottom: '1px solid rgba(58,127,255,0.12)', paddingBottom: 5, marginBottom: 2 }}>
+          CLICK · SELECT&nbsp;&nbsp;CTRL+CLICK · TAB
+        </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
           <span style={{
             width: 8,
@@ -1505,7 +1517,10 @@ function ResourceHeatmapModule({ satellites, selectedSatellite }: { satellites: 
 function ManeuverTimelineModule({ selectedId, satellites }: { selectedId?: string; satellites: Satellite[] }) {
   const [pending, setPending] = useState<any[]>([]);
   const [executed, setExecuted] = useState<any[]>([]);
+  const [hoveredKey, setHoveredKey] = useState<string | null>(null);
+  const [isExpanded, setIsExpanded] = useState(false);
 
+  // ── Unchanged data-fetch logic ────────────────────────────────────────────
   useEffect(() => {
     let stop = false;
     const poll = async () => {
@@ -1545,9 +1560,11 @@ function ManeuverTimelineModule({ selectedId, satellites }: { selectedId?: strin
   const all = sourceItems
     .sort((a, b) => Number(a.burn_start ?? a.burn_time ?? 0) - Number(b.burn_start ?? b.burn_time ?? 0))
     .slice(-28);
+
   const now = Date.now() / 1000;
-  const pendingCount = pending.length || synthesizedFromStatus.filter((m) => m.status === 'PENDING').length;
+  const pendingCount  = pending.length  || synthesizedFromStatus.filter((m) => m.status === 'PENDING').length;
   const executedCount = executed.length || synthesizedFromStatus.filter((m) => m.status === 'EXECUTED').length;
+
   const nextSelectedBurn = selectedId
     ? all.find((m) => (m.satellite_id || '') === selectedId && Number(m.burn_start ?? m.burn_time ?? 0) >= now)
     : null;
@@ -1565,79 +1582,637 @@ function ManeuverTimelineModule({ selectedId, satellites }: { selectedId?: strin
 
   const formatUtc = (sec: number) => {
     const d = new Date(sec * 1000);
-    const hh = String(d.getUTCHours()).padStart(2, '0');
-    const mm = String(d.getUTCMinutes()).padStart(2, '0');
-    return `${hh}:${mm} UTC`;
+    return `${String(d.getUTCHours()).padStart(2,'0')}:${String(d.getUTCMinutes()).padStart(2,'0')}`;
   };
 
+  // ── Time-axis computation (unchanged logic) ───────────────────────────────
   const eventStarts = all.map((m) => Number(m.burn_time || m.burn_start || now));
-  const eventEnds = all.map((m) => Number(m.cooldown_end || m.burn_end || m.burn_time || now));
+  const eventEnds   = all.map((m) => Number(m.cooldown_end || m.burn_end || m.burn_time || now));
   const rawMin = eventStarts.length ? Math.min(...eventStarts) : now;
-  const rawMax = eventEnds.length ? Math.max(...eventEnds) : now + 3600;
+  const rawMax = eventEnds.length   ? Math.max(...eventEnds)   : now + 3600;
   const dynamicPad = Math.max(900, (rawMax - rawMin) * 0.18);
   const tMin = Math.min(now - 1200, rawMin - dynamicPad);
   const tMax = Math.max(now + 1800, rawMax + dynamicPad);
   const span = Math.max(1, tMax - tMin);
 
-  const xAt = (t: number) => 2 + ((t - tMin) / span) * 96;
-  const tickTimes = [0, 0.25, 0.5, 0.75, 1].map((p) => tMin + span * p);
+  // Pixel-% helper: returns 0-100 position inside the chart area
+  const xPct = (t: number) => Math.max(0, Math.min(100, ((t - tMin) / span) * 100));
+
+  // 8 evenly-spaced tick marks
+  const NUM_TICKS = 8;
+  const tickTimes = Array.from({ length: NUM_TICKS }, (_, i) => tMin + (span * i) / (NUM_TICKS - 1));
+
+  // Layout constants
+  const LABEL_W = 72; // px — fixed left label column
 
   return (
-    <div style={{ background: '#0a1124', border: '1px solid #1f3c5e', borderRadius: 8, padding: 12, height: '100%', overflow: 'hidden', display: 'flex', flexDirection: 'column', boxSizing: 'border-box' }}>
+    <div style={{
+      background: '#08101e',
+      border: '1px solid #1a2d45',
+      borderRadius: 8,
+      /* ── Expand / collapse height ── */
+      height: isExpanded ? '70vh' : 260,
+      minHeight: isExpanded ? 400 : 220,
+      transition: 'height 0.3s ease-in-out, min-height 0.3s ease-in-out',
+      overflow: 'hidden',
+      display: 'flex',
+      flexDirection: 'column',
+      boxSizing: 'border-box',
+      fontFamily: 'Azeret Mono, monospace',
+      /* Stick to top of scroll container when expanded */
+      position: isExpanded ? 'sticky' : 'relative',
+      top: isExpanded ? 0 : 'auto',
+      zIndex: isExpanded ? 20 : 'auto',
+    }}>
       <style>{`
-        #maneuver-timeline-scroll::-webkit-scrollbar { width: 8px; }
-        #maneuver-timeline-scroll::-webkit-scrollbar-track { background: transparent; }
-        #maneuver-timeline-scroll::-webkit-scrollbar-thumb { background: #1f3c5e; border-radius: 4px; }
-        #maneuver-timeline-scroll::-webkit-scrollbar-thumb:hover { background: #2a5a9f; }
+        #gantt-rows::-webkit-scrollbar { width: 5px; }
+        #gantt-rows::-webkit-scrollbar-track { background: transparent; }
+        #gantt-rows::-webkit-scrollbar-thumb { background: #1f3c5e; border-radius: 3px; }
+        #gantt-hscroll::-webkit-scrollbar { height: 4px; }
+        #gantt-hscroll::-webkit-scrollbar-track { background: transparent; }
+        #gantt-hscroll::-webkit-scrollbar-thumb { background: #1f3c5e; border-radius: 3px; }
+        .gantt-block { transition: filter 0.15s ease, box-shadow 0.15s ease; }
+        .gantt-block:hover { filter: brightness(1.25) !important; }
+        @keyframes gantt-pulse { 0%,100%{opacity:1} 50%{opacity:0.6} }
+        @keyframes gantt-march {
+          from { background-position: 0 0; }
+          to   { background-position: 28px 0; }
+        }
       `}</style>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, marginBottom: 8 }}>
-        <p style={{ color: '#8aa8d8', fontSize: 11, letterSpacing: 1 }}>MANEUVER TIMELINE</p>
-        <p style={{ color: '#9cb0cc', fontSize: 10 }}>Pending {pendingCount} | Executed {executedCount}</p>
+
+      {/* ── Top header bar ── */}
+      <div style={{
+        display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+        padding: '6px 10px', borderBottom: '1px solid #1a2d45',
+        flexShrink: 0, gap: 8,
+      }}>
+        {/* Left: icon + title */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
+          <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+            <rect y="1" width="14" height="2" rx="1" fill="#4a7fc1"/>
+            <rect y="6" width="10" height="2" rx="1" fill="#4a7fc1"/>
+            <rect y="11" width="12" height="2" rx="1" fill="#4a7fc1"/>
+          </svg>
+          <span style={{ color: '#d0e4f7', fontSize: 11, fontWeight: 600, letterSpacing: 0.5 }}>
+            Maneuver Timeline
+          </span>
+          <span style={{ color: '#4a6a8a', fontSize: 10 }}>(Gantt Scheduler)</span>
+        </div>
+        {/* Right: counters + clock + expand button */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <div style={{ display: 'flex', gap: 5, fontSize: 9 }}>
+            <span style={{ background: '#11223a', borderRadius: 4, padding: '2px 6px', color: '#ffad33' }}>
+              ⏳ {pendingCount}
+            </span>
+            <span style={{ background: '#11223a', borderRadius: 4, padding: '2px 6px', color: '#7bd88f' }}>
+              ✓ {executedCount}
+            </span>
+          </div>
+          <div style={{
+            display: 'flex', alignItems: 'center', gap: 4,
+            background: '#101c2e', border: '1px solid #1f3c5e',
+            borderRadius: 5, padding: '2px 6px', fontSize: 9, color: '#8aa8d8',
+          }}>
+            <svg width="9" height="9" viewBox="0 0 12 12" fill="none">
+              <circle cx="6" cy="6" r="5" stroke="#4a7fc1" strokeWidth="1.5"/>
+              <path d="M6 3v3l2 1.5" stroke="#4a7fc1" strokeWidth="1.5" strokeLinecap="round"/>
+            </svg>
+            {formatUtc(now)} UTC
+          </div>
+          {/* ── Expand / Collapse button ── */}
+          <button
+            onClick={() => setIsExpanded(e => !e)}
+            title={isExpanded ? 'Collapse timeline' : 'Expand timeline (Focus Mode)'}
+            style={{
+              background: isExpanded ? 'rgba(58,127,255,0.15)' : '#101c2e',
+              border: `1px solid ${isExpanded ? '#3a7fff' : '#1f3c5e'}`,
+              borderRadius: 5,
+              color: isExpanded ? '#89d4ff' : '#6f87a8',
+              fontSize: 13,
+              lineHeight: 1,
+              padding: '2px 7px',
+              cursor: 'pointer',
+              transition: 'all 0.2s ease',
+              display: 'flex', alignItems: 'center', gap: 4,
+            }}
+          >
+            {isExpanded ? (
+              /* Collapse icon — two arrows pointing in */
+              <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
+                <path d="M1 1l4 4M1 1h3M1 1v3" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round"/>
+                <path d="M11 11l-4-4M11 11h-3M11 11v-3" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round"/>
+              </svg>
+            ) : (
+              /* Expand icon — two arrows pointing out */
+              <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
+                <path d="M5 1H1v4M1 1l4 4" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round"/>
+                <path d="M7 11h4v-4M11 11l-4-4" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round"/>
+              </svg>
+            )}
+            <span style={{ fontSize: 8, letterSpacing: 0.5 }}>
+              {isExpanded ? 'COLLAPSE' : 'EXPAND'}
+            </span>
+          </button>
+        </div>
       </div>
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6, marginBottom: 8, fontSize: 10 }}>
-        <div style={{ background: '#11223a', borderRadius: 6, padding: '5px 7px', color: '#9cb0cc' }}>
+
+      {/* ── ETA mini-strip ── */}
+      <div style={{
+        display: 'flex', gap: 6, padding: '4px 10px',
+        borderBottom: '1px solid #111d2e', flexShrink: 0,
+      }}>
+        <div style={{ background: '#0e1b2e', borderRadius: 4, padding: '2px 8px', fontSize: 9, color: '#9cb0cc', flex: 1 }}>
           Next Fleet Burn: <span style={{ color: 'white' }}>{etaLabel(nextGlobalBurn)}</span>
         </div>
-        <div style={{ background: '#11223a', borderRadius: 6, padding: '5px 7px', color: '#9cb0cc' }}>
+        <div style={{ background: '#0e1b2e', borderRadius: 4, padding: '2px 8px', fontSize: 9, color: '#9cb0cc', flex: 1 }}>
           Selected ETA: <span style={{ color: 'white' }}>{etaLabel(nextSelectedBurn)}</span>
         </div>
       </div>
-      <div id="maneuver-timeline-scroll" style={{ height: 'calc(100% - 56px)', overflowY: 'auto', paddingRight: 4, scrollbarWidth: 'thin', scrollbarColor: '#1f3c5e transparent' }}>
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', color: '#6f87a8', fontSize: 9, marginBottom: 6 }}>
-          {tickTimes.map((t, idx) => (
-            <span key={idx} style={{ textAlign: idx === 0 ? 'left' : idx === 4 ? 'right' : 'center' }}>{formatUtc(t)}</span>
+
+      {/* ── Horizontal scroll container (time axis + rows scroll together) ── */}
+      <div id="gantt-hscroll" style={{
+        flex: 1,
+        overflowX: 'auto',
+        overflowY: 'hidden',
+        display: 'flex',
+        flexDirection: 'column',
+        minHeight: 0,
+        scrollbarWidth: 'thin' as const,
+        scrollbarColor: '#1f3c5e transparent',
+      }}>
+        {/* Min-width ensures time axis never compresses below readability */}
+        <div style={{ minWidth: 520, flex: 1, display: 'flex', flexDirection: 'column' }}>
+
+      {/* ── Time-axis header ── */}
+      <div style={{
+        display: 'flex', alignItems: 'stretch',
+        borderBottom: '1px solid #1a2d45', flexShrink: 0,
+        background: '#090f1c',
+      }}>
+        {/* Corner cell */}
+        <div style={{
+          width: LABEL_W, flexShrink: 0,
+          borderRight: '1px solid #1a2d45',
+          padding: '3px 6px', display: 'flex', alignItems: 'center', gap: 4,
+        }}>
+          <span style={{ color: '#4a6a8a', fontSize: 8, letterSpacing: 0.5 }}>Time</span>
+          <span style={{
+            background: '#11223a', borderRadius: 3,
+            color: '#5a8abf', fontSize: 7, padding: '1px 4px',
+          }}>UTC</span>
+        </div>
+        {/* Tick labels */}
+        <div style={{ flex: 1, position: 'relative', height: 22, overflow: 'hidden' }}>
+          {tickTimes.map((t, i) => (
+            <span key={i} style={{
+              position: 'absolute',
+              left: `${(i / (NUM_TICKS - 1)) * 100}%`,
+              transform: 'translateX(-50%)',
+              color: '#4a6a8a', fontSize: 8, top: '50%', marginTop: -5,
+              whiteSpace: 'nowrap', userSelect: 'none',
+            }}>
+              {formatUtc(t)}
+            </span>
           ))}
         </div>
-        {all.length === 0 ? (
-          <p style={{ color: '#5f7291', fontSize: 11 }}>No maneuvers scheduled/executed yet.</p>
-        ) : all.map((m, idx) => {
-          const sat = m.satellite_id || 'SAT';
-          const isSelectedSat = Boolean(selectedId && sat === selectedId);
-          const bStart = Number(m.burn_start ?? m.burn_time ?? now);
-          const bEnd = Number(m.burn_end ?? bStart);
-          const cdEnd = Number(m.cooldown_end ?? (bEnd + 600));
-          const burnLeft = Math.max(0, Math.min(100, xAt(bStart)));
-          const burnW = Math.max(0.8, Math.min(100 - burnLeft, xAt(bEnd) - burnLeft + 0.8));
-          const cdLeft = Math.max(0, Math.min(100, xAt(bEnd)));
-          const cdW = Math.max(1.2, Math.min(100 - cdLeft, xAt(cdEnd) - cdLeft));
-          const statusLabel = m.status || (m.created_at ? 'PENDING' : 'EXECUTED');
-          const statusColor = statusLabel === 'EXECUTED' ? '#7bd88f' : statusLabel === 'PENDING' ? '#ffad33' : '#58a6ff';
-          return (
-            <div key={`${sat}-${idx}`} style={{ marginBottom: 8, padding: '4px 5px', borderRadius: 6, border: isSelectedSat ? '1px solid #2f5f91' : '1px solid transparent', background: isSelectedSat ? 'rgba(22,49,78,0.3)' : 'transparent' }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', color: '#96abc9', fontSize: 10 }}>
-                <span>{sat} · {m.burn_id || 'BURN'}</span>
-                <span style={{ color: statusColor }}>{statusLabel}</span>
+      </div>
+
+      {/* ── Gantt rows ── */}
+      {all.length === 0 ? (
+        <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+          <p style={{ color: '#2a3a52', fontSize: 11 }}>No maneuvers scheduled / executed yet.</p>
+        </div>
+      ) : (
+        <div id="gantt-rows" style={{ flex: 1, overflowY: 'auto', overflowX: 'hidden', scrollbarWidth: 'thin' as const, scrollbarColor: '#1f3c5e transparent' }}>
+          {all.map((m, idx) => {
+            const sat           = m.satellite_id || 'SAT';
+            const isSelectedSat = Boolean(selectedId && sat === selectedId);
+            const bStart        = Number(m.burn_start ?? m.burn_time ?? now);
+            const bEnd          = Number(m.burn_end   ?? bStart + 120);
+            const cdEnd         = Number(m.cooldown_end ?? (bEnd + 600));
+            const statusLabel   = m.status || (m.created_at ? 'PENDING' : 'EXECUTED');
+            const isPending     = statusLabel === 'PENDING';
+            const isActive      = bStart <= now && now <= bEnd;
+            const rowKey        = `${sat}-${idx}`;
+            const isHovered     = hoveredKey === rowKey;
+
+            // Block positions in %
+            const burnL  = xPct(bStart);
+            const burnR  = xPct(bEnd);
+            const burnW  = Math.max(2, burnR - burnL);
+            const cdL    = burnR;
+            const cdW    = Math.max(1.5, xPct(cdEnd) - cdL);
+
+            // Classify burn-start event type for colour
+            const isAtRisk    = satellites.find(s => s.id === sat)?.status === 'AT_RISK';
+            const isManeuvering = satellites.find(s => s.id === sat)?.status === 'MANEUVERING';
+
+            // Colour scheme per block type
+            const burnColor  = isAtRisk   ? '#c0392b'
+                             : isManeuvering ? '#27ae60'
+                             : isPending  ? 'rgba(39,174,96,0.55)'
+                             : '#27ae60';
+            const burnGlow   = isAtRisk   ? '0 0 8px rgba(192,57,43,0.6)'
+                             : isActive   ? '0 0 8px rgba(39,174,96,0.55)'
+                             : 'none';
+            const cdColor    = '#e8b84b';  // yellow — burn-end / cooldown
+
+            // Striped "marching ants" CSS for cooldown zone (orbital zone)
+            const stripeBg = `repeating-linear-gradient(
+              45deg,
+              rgba(232,184,75,0.22) 0px, rgba(232,184,75,0.22) 6px,
+              rgba(20,35,60,0.3) 6px, rgba(20,35,60,0.3) 14px
+            )`;
+
+            return (
+              <div
+                key={rowKey}
+                style={{
+                  display: 'flex', alignItems: 'stretch',
+                  borderBottom: '1px solid #0f1c2e',
+                  background: isSelectedSat
+                    ? 'rgba(30,60,100,0.28)'
+                    : isHovered ? 'rgba(255,255,255,0.02)' : 'transparent',
+                  transition: 'background 0.15s',
+                  minHeight: 32,
+                }}
+                onMouseEnter={() => setHoveredKey(rowKey)}
+                onMouseLeave={() => setHoveredKey(null)}
+              >
+                {/* ── Satellite label column ── */}
+                <div style={{
+                  width: LABEL_W, flexShrink: 0,
+                  borderRight: '1px solid #1a2d45',
+                  display: 'flex', flexDirection: 'column',
+                  justifyContent: 'center', padding: '0 6px',
+                  gap: 1,
+                }}>
+                  <span style={{
+                    color: isSelectedSat ? '#89d4ff' : '#c8ddf0',
+                    fontSize: 10, fontWeight: 600, letterSpacing: 0.3,
+                    overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                  }}>
+                    {sat}
+                  </span>
+                  <span style={{ color: '#3a5272', fontSize: 8 }}>
+                    {m.burn_id || 'BURN'}
+                    {m.synthetic ? ' ·live' : ''}
+                  </span>
+                </div>
+
+                {/* ── Timeline track ── */}
+                <div style={{ flex: 1, position: 'relative', overflow: 'hidden', margin: '5px 0' }}>
+
+                  {/* Vertical grid lines */}
+                  {tickTimes.map((_, i) => (
+                    <div key={i} style={{
+                      position: 'absolute',
+                      left: `${(i / (NUM_TICKS - 1)) * 100}%`,
+                      top: 0, bottom: 0,
+                      width: 1,
+                      background: 'rgba(30,55,90,0.5)',
+                      pointerEvents: 'none',
+                    }} />
+                  ))}
+
+                  {/* "Now" marker */}
+                  {now >= tMin && now <= tMax && (
+                    <div style={{
+                      position: 'absolute',
+                      left: `${xPct(now)}%`,
+                      top: -5, bottom: -5,
+                      width: 1.5,
+                      background: 'rgba(255,80,80,0.7)',
+                      zIndex: 10,
+                      pointerEvents: 'none',
+                      boxShadow: '0 0 4px rgba(255,80,80,0.5)',
+                    }} />
+                  )}
+
+                  {/* ── Burn-start block (green) ── */}
+                  <div
+                    className="gantt-block"
+                    title={`Burn Start · ${formatUtc(bStart)} UTC`}
+                    style={{
+                      position: 'absolute',
+                      left: `${burnL}%`,
+                      width: `${burnW * 0.48}%`,   // left half = burn start
+                      top: 0, bottom: 0,
+                      background: burnColor,
+                      borderRadius: '4px 0 0 4px',
+                      opacity: isPending ? 0.65 : 1,
+                      boxShadow: burnGlow,
+                      display: 'flex', alignItems: 'center', overflow: 'hidden',
+                      cursor: 'default',
+                      animation: isActive ? 'gantt-pulse 1.8s ease-in-out infinite' : 'none',
+                    }}
+                  >
+                    <span style={{
+                      color: 'white', fontSize: 8, paddingLeft: 5,
+                      whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+                      display: 'flex', alignItems: 'center', gap: 3,
+                    }}>
+                      {isAtRisk ? '⚠' : '🔥'} Burn Start
+                    </span>
+                  </div>
+
+                  {/* ── Burn-end block (yellow) ── */}
+                  <div
+                    className="gantt-block"
+                    title={`Burn End · ${formatUtc(bEnd)} UTC`}
+                    style={{
+                      position: 'absolute',
+                      left: `${burnL + burnW * 0.5}%`,
+                      width: `${burnW * 0.5}%`,
+                      top: 0, bottom: 0,
+                      background: cdColor,
+                      borderRadius: '0 4px 4px 0',
+                      opacity: isPending ? 0.6 : 1,
+                      display: 'flex', alignItems: 'center', overflow: 'hidden',
+                      cursor: 'default',
+                    }}
+                  >
+                    <span style={{
+                      color: '#1a1200', fontSize: 8, paddingLeft: 5,
+                      whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+                      display: 'flex', alignItems: 'center', gap: 3,
+                    }}>
+                      🔒 Burn End
+                    </span>
+                  </div>
+
+                  {/* ── Cooldown / orbital zone (striped) ── */}
+                  {cdW > 0 && (
+                    <div
+                      className="gantt-block"
+                      title={`Cooldown / Orbital Zone · ends ${formatUtc(cdEnd)} UTC`}
+                      style={{
+                        position: 'absolute',
+                        left: `${cdL}%`,
+                        width: `${cdW}%`,
+                        top: 1, bottom: 1,
+                        background: stripeBg,
+                        backgroundSize: '28px 28px',
+                        borderRadius: 3,
+                        border: '1px solid rgba(232,184,75,0.25)',
+                        opacity: isPending ? 0.45 : 0.8,
+                        display: 'flex', alignItems: 'center', overflow: 'hidden',
+                        cursor: 'default',
+                        animation: 'gantt-march 1.2s linear infinite',
+                      }}
+                    >
+                      {cdW > 6 && (
+                        <span style={{
+                          color: '#e8b84b', fontSize: 7.5, paddingLeft: 5,
+                          whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+                        }}>
+                          ◎ Orbital Zone
+                        </span>
+                      )}
+                    </div>
+                  )}
+
+                  {/* Status badge (far right of row) */}
+                  <div style={{
+                    position: 'absolute', right: 4, top: '50%', transform: 'translateY(-50%)',
+                    background: isPending ? 'rgba(255,173,51,0.15)' : 'rgba(123,216,143,0.12)',
+                    border: `1px solid ${isPending ? 'rgba(255,173,51,0.3)' : 'rgba(123,216,143,0.25)'}`,
+                    borderRadius: 3, padding: '1px 5px',
+                    color: isPending ? '#ffad33' : '#7bd88f',
+                    fontSize: 7, letterSpacing: 0.5, zIndex: 5,
+                    pointerEvents: 'none',
+                  }}>
+                    {statusLabel}
+                  </div>
+                </div>
               </div>
-              {m.synthetic && (
-                <p style={{ color: '#6f87a8', fontSize: 9, marginTop: 2 }}>Live fallback from satellite status</p>
+            );
+          })}
+        </div>
+      )}
+
+        </div>{/* end minWidth wrapper */}
+      </div>{/* end gantt-hscroll */}
+    </div>
+  );
+}
+
+// ── Fuel Consumed vs Collisions Avoided Graph ─────────────────────────────────
+function FuelCollisionGraph({ tableRows }: { tableRows: Satellite[] }) {
+  const [search, setSearch]           = useState('');
+  const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  const [dropdownOpen, setDropdownOpen] = useState(false);
+  const dropdownRef = useRef<HTMLDivElement>(null);
+
+  // Close dropdown on outside click
+  useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      if (dropdownRef.current && !dropdownRef.current.contains(e.target as Node)) {
+        setDropdownOpen(false);
+        setSearch('');
+      }
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, []);
+
+  // Full processed dataset sorted by fuel desc
+  const allChartData = useMemo(() =>
+    tableRows
+      .map(s => ({
+        rawId: s.id,
+        id: s.id.replace('SAT-', 'S'),
+        fuel: Math.max(0, 50 - (parseFloat(s.propellant) || 0)),        // fuel CONSUMED = 50kg max - remaining
+        risk: parseFloat(s.debris) > 0
+          ? Math.max(0, Math.round((500 - Math.min(500, parseFloat(s.debris))) / 50))
+          : 0,
+      }))
+      .sort((a, b) => b.fuel - a.fuel),
+  [tableRows]);
+
+  // Filtered dropdown options based on search
+  const dropdownOptions = useMemo(() => {
+    const q = search.toLowerCase();
+    return allChartData.filter(d => d.rawId.toLowerCase().includes(q) || d.id.toLowerCase().includes(q));
+  }, [allChartData, search]);
+
+  // Final chart data: selected override or top-10 default
+  const chartData = useMemo(() => {
+    if (selectedIds.length === 0) return allChartData.slice(0, 10);
+    const set = new Set(selectedIds);
+    const filtered = allChartData.filter(d => set.has(d.rawId));
+    return filtered.length > 0 ? filtered : [];
+  }, [allChartData, selectedIds]);
+
+  const toggleId = (rawId: string) => {
+    setSelectedIds(prev =>
+      prev.includes(rawId) ? prev.filter(x => x !== rawId) : [...prev, rawId]
+    );
+  };
+
+  const clearSelection = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    setSelectedIds([]);
+    setSearch('');
+  };
+
+  const pillLabel = selectedIds.length === 0
+    ? 'Top 10 by Fuel'
+    : selectedIds.length === 1
+      ? selectedIds[0].replace('SAT-', 'S')
+      : `${selectedIds.length} selected`;
+
+  return (
+    <div style={{
+      overflow: 'hidden',
+      height: '100%',
+      background: '#0a1124',
+      border: '1px solid #1f3c5e',
+      borderRadius: 8,
+      display: 'flex',
+      flexDirection: 'column',
+      padding: '8px 10px',
+      boxSizing: 'border-box',
+      position: 'relative',
+    }}>
+      {/* ── Header row ── */}
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 5, flexShrink: 0 }}>
+        <p style={{ color: '#8aa8d8', fontSize: 10, letterSpacing: 1 }}>
+          FUEL CONSUMED vs COLLISIONS AVOIDED
+        </p>
+
+        {/* ── Dropdown trigger ── */}
+        <div ref={dropdownRef} style={{ position: 'relative' }}>
+          <button
+            onClick={() => { setDropdownOpen(o => !o); }}
+            style={{
+              display: 'flex', alignItems: 'center', gap: 4,
+              background: '#0e1b2e', border: '1px solid #1f3c5e',
+              borderRadius: 5, padding: '2px 7px',
+              color: selectedIds.length > 0 ? '#89d4ff' : '#6f87a8',
+              fontSize: 9, cursor: 'pointer', whiteSpace: 'nowrap',
+              maxWidth: 110, overflow: 'hidden', textOverflow: 'ellipsis',
+            }}
+          >
+            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>{pillLabel}</span>
+            {selectedIds.length > 0 && (
+              <span
+                onClick={clearSelection}
+                style={{ marginLeft: 2, color: '#ff5b4d', fontWeight: 700, fontSize: 10, lineHeight: 1, flexShrink: 0 }}
+                title="Clear selection"
+              >×</span>
+            )}
+            <span style={{ marginLeft: 2, flexShrink: 0, opacity: 0.6 }}>{dropdownOpen ? '▲' : '▼'}</span>
+          </button>
+
+          {/* ── Dropdown panel ── */}
+          {dropdownOpen && (
+            <div style={{
+              position: 'absolute', top: '100%', right: 0, zIndex: 100,
+              background: '#0e1b2e', border: '1px solid #1f3c5e',
+              borderRadius: 6, marginTop: 3,
+              width: 170, maxHeight: 180, display: 'flex', flexDirection: 'column',
+              boxShadow: '0 6px 20px rgba(0,0,0,0.5)',
+            }}>
+              {/* Search input */}
+              <input
+                autoFocus
+                value={search}
+                onChange={e => setSearch(e.target.value)}
+                placeholder="Search satellite…"
+                style={{
+                  background: '#0b1527', border: 'none', borderBottom: '1px solid #1a2a42',
+                  color: 'white', fontSize: 10, padding: '5px 8px', outline: 'none',
+                  borderRadius: '6px 6px 0 0', flexShrink: 0,
+                }}
+              />
+              {/* Options list */}
+              <div style={{ overflowY: 'auto', flex: 1, scrollbarWidth: 'thin', scrollbarColor: '#1f3c5e transparent' }}>
+                {dropdownOptions.length === 0 ? (
+                  <p style={{ color: '#4a5568', fontSize: 10, padding: '6px 8px' }}>No satellites found</p>
+                ) : dropdownOptions.map(d => {
+                  const checked = selectedIds.includes(d.rawId);
+                  return (
+                    <div
+                      key={d.rawId}
+                      onClick={() => toggleId(d.rawId)}
+                      style={{
+                        display: 'flex', alignItems: 'center', gap: 6,
+                        padding: '4px 8px', cursor: 'pointer', fontSize: 10,
+                        color: checked ? '#89d4ff' : '#a0b4cc',
+                        background: checked ? 'rgba(58,127,255,0.1)' : 'transparent',
+                      }}
+                      onMouseEnter={e => { if (!checked) (e.currentTarget as HTMLDivElement).style.background = 'rgba(255,255,255,0.04)'; }}
+                      onMouseLeave={e => { (e.currentTarget as HTMLDivElement).style.background = checked ? 'rgba(58,127,255,0.1)' : 'transparent'; }}
+                    >
+                      <span style={{
+                        width: 10, height: 10, borderRadius: 2, flexShrink: 0,
+                        border: `1px solid ${checked ? '#3a7fff' : '#2a3f5e'}`,
+                        background: checked ? '#3a7fff' : 'transparent',
+                        display: 'flex', alignItems: 'center', justifyContent: 'center',
+                      }}>
+                        {checked && <span style={{ color: 'white', fontSize: 8, lineHeight: 1 }}>✓</span>}
+                      </span>
+                      <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{d.rawId}</span>
+                      <span style={{ marginLeft: 'auto', color: '#4a5a72', flexShrink: 0 }}>{d.fuel.toFixed(0)}kg</span>
+                    </div>
+                  );
+                })}
+              </div>
+              {/* Footer: clear all */}
+              {selectedIds.length > 0 && (
+                <div
+                  onClick={clearSelection}
+                  style={{
+                    borderTop: '1px solid #1a2a42', padding: '4px 8px',
+                    fontSize: 9, color: '#ff5b4d', cursor: 'pointer',
+                    textAlign: 'center', flexShrink: 0,
+                  }}
+                >
+                  Clear all ({selectedIds.length})
+                </div>
               )}
-              <div style={{ position: 'relative', height: 10, background: '#152238', borderRadius: 5, marginTop: 3 }}>
-                <div style={{ position: 'absolute', left: `${burnLeft}%`, width: `${burnW}%`, height: '100%', background: '#58a6ff', borderRadius: 5 }} />
-                <div style={{ position: 'absolute', left: `${cdLeft}%`, width: `${cdW}%`, height: '100%', background: 'rgba(255,183,77,0.45)', borderRadius: 5 }} />
-              </div>
             </div>
-          );
-        })}
+          )}
+        </div>
+      </div>
+
+      {/* ── Chart ── */}
+      {chartData.length === 0 ? (
+        <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', minHeight: 0 }}>
+          <p style={{ color: '#3a4a62', fontSize: 10 }}>No data for selected satellites</p>
+        </div>
+      ) : (
+        <div style={{ flex: 1, minHeight: 0 }}>
+          <ResponsiveContainer width="100%" height="100%">
+            <BarChart data={chartData} barGap={2} margin={{ top: 4, right: 4, left: -18, bottom: 0 }}>
+              <CartesianGrid strokeDasharray="3 3" stroke="#1a2a42" vertical={false} />
+              <XAxis dataKey="id" tick={{ fill: '#6f87a8', fontSize: 9 }} axisLine={false} tickLine={false} />
+              <YAxis tick={{ fill: '#6f87a8', fontSize: 9 }} axisLine={false} tickLine={false} />
+              <RechartsTooltip
+                contentStyle={{ background: '#0e1a2f', border: '1px solid #1f3c5e', borderRadius: 6, fontSize: 10, color: '#d2e1f4' }}
+                cursor={{ fill: 'rgba(58,127,255,0.06)' }}
+              />
+              <Bar dataKey="fuel" name="Fuel Consumed (kg)" fill="#3a7fff" radius={[3, 3, 0, 0]} maxBarSize={14} />
+              <Bar dataKey="risk" name="Collisions Avoided" fill="#ff5b4d" radius={[3, 3, 0, 0]} maxBarSize={14} />
+            </BarChart>
+          </ResponsiveContainer>
+        </div>
+      )}
+
+      {/* ── Legend ── */}
+      <div style={{ display: 'flex', gap: 12, flexShrink: 0, marginTop: 4, fontSize: 9, color: '#6f87a8' }}>
+        <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+          <span style={{ width: 8, height: 8, borderRadius: 2, background: '#3a7fff', display: 'inline-block' }} />
+          Fuel Consumed (kg)
+        </span>
+        <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+          <span style={{ width: 8, height: 8, borderRadius: 2, background: '#ff5b4d', display: 'inline-block' }} />
+          Collisions Avoided
+        </span>
+        <span style={{ marginLeft: 'auto', color: '#3a4a62' }}>
+          {selectedIds.length === 0 ? `top ${Math.min(10, allChartData.length)}` : `${chartData.length} sat`}
+        </span>
       </div>
     </div>
   );
@@ -1700,7 +2275,7 @@ export default function EnhancedDashboard() {
   const tableRows = liveSats.map((sat) => satToRow(sat, debrisList, now));
   const selectedSat = tableRows.find(s => s.id === selectedId) || tableRows[0];
 
-  // Auto-open first satellite tab when data arrives
+  // Auto-open first satellite tab when data first arrives (one-time bootstrap only)
   useEffect(() => {
     if (tableRows.length > 0 && openTabIds.length === 0) {
       const firstId = tableRows[0].id;
@@ -1717,12 +2292,34 @@ export default function EnhancedDashboard() {
     });
   }, [tableRows]);
 
-  // If selection comes from map/radar/table, ensure the tab bar reflects it.
-  useEffect(() => {
-    if (!selectedId) return;
-    if (!tableRows.some((s) => s.id === selectedId)) return;
-    setOpenTabIds((prev) => (prev.includes(selectedId) ? prev : [...prev, selectedId]));
-  }, [selectedId, tableRows]);
+  // ── Unified satellite click handler ───────────────────────────────────────
+  //
+  // Normal click    → select the satellite; refreshes telemetry/radar/map/globe.
+  //                   Does NOT create or switch tabs — keeps the workspace clean.
+  //
+  // Ctrl/Cmd click  → select the satellite AND open (or switch to) its tab.
+  //                   Duplicate tabs are prevented: if the tab already exists we
+  //                   simply activate it instead of appending another.
+  //
+  // Threaded into every interactive surface:
+  //   • 2D map marker   (via MapViewPanel onSelect(id, ctrlOpen))
+  //   • 3D globe click  (via GlobeView onSelect(id, ctrlOpen))
+  //   • Satellite table row
+  const handleSatelliteClick = useCallback((id: string, ctrlOpen = false) => {
+    if (!tableRows.some(s => s.id === id)) return;
+
+    // Always update selection — refreshes telemetry panel, bullseye radar,
+    // ground-track highlight, 3D orbit overlay, and heatmap selection marker
+    setSelectedId(id);
+
+    if (ctrlOpen) {
+      // Ctrl/Cmd + click: open in tab (no-op if tab already exists → just selects)
+      setOpenTabIds(prev =>
+        prev.includes(id) ? prev : [...prev, id]
+      );
+    }
+    // Normal click: selection updated above, no tab mutation
+  }, [tableRows]);
 
   const activeTabs = openTabIds
     .map(id => tableRows.find(s => s.id === id))
@@ -1753,10 +2350,10 @@ export default function EnhancedDashboard() {
     );
   }, [tableRows, openTabIds, addSatQuery]);
 
+  // Tab bar click: clicking an existing tab always selects that satellite
+  // and updates all panels. The tab must already exist (user created it via
+  // Ctrl+click or the Add Satellite modal).
   const handleSelectTab = (id: string) => {
-    if (!openTabIds.includes(id)) {
-      setOpenTabIds((prev) => [...prev, id]);
-    }
     setSelectedId(id);
   };
 
@@ -1927,53 +2524,103 @@ export default function EnhancedDashboard() {
             satellites={liveDataReady ? tableRows : []}
             debrisList={liveDataReady ? mapDebrisList : []}
             selectedId={selectedId}
-            onSelect={setSelectedId}
+            // Pass handleSatelliteClick so MapViewPanel can forward ctrlKey flag
+            onSelect={handleSatelliteClick}
             debrisFilterKm={MAP_DEBRIS_RANGE_KM}
           />
         </div>
 
-        {/* ══ RIGHT COLUMN: radar + telemetry + compliance modules ══ */}
+        {/* ══ RIGHT COLUMN: flex column — pinned top + scrollable bottom ══ */}
         <div style={{
           gridRow: '2 / 5',
           gridColumn: 2,
-          display: 'grid',
-          gridTemplateRows: compactLayout
-            ? 'minmax(0, 1.85fr) minmax(0, 1.45fr) minmax(0, 1fr)'
-            : 'minmax(0, 1.75fr) minmax(0, 1.5fr) minmax(0, 1.1fr)',
+          display: 'flex',
+          flexDirection: 'column',
           overflow: 'hidden',
           minHeight: 0,
           background: '#07070f',
           borderLeft: '1px solid #1a1a2e',
-          gap: 8,
-          padding: 8,
           boxSizing: 'border-box',
         }}>
-          {/* Top module: radar left, telemetry + alert stacked right */}
-          <div style={{ display: 'grid', gridTemplateColumns: compactLayout ? 'minmax(0, 1.5fr) minmax(0, 1.05fr)' : 'minmax(0, 1.6fr) minmax(0, 1fr)', minHeight: 0, overflow: 'hidden', gap: 6, border: '1px solid #1a1a2e', borderRadius: 8, padding: 6, boxSizing: 'border-box' }}>
-            <div style={{ overflow: 'hidden', minHeight: 0, borderRadius: 8 }}>
+
+          {/* ╔══════════════════════════════════╗
+              ║  TOP SECTION — always visible    ║
+              ╚══════════════════════════════════╝
+              Radar left | Telemetry+Alert right  */}
+          <div style={{
+            flexShrink: 0,
+            display: 'grid',
+            gridTemplateColumns: '1fr 1fr',
+            gap: 8,
+            padding: '8px 8px 4px 8px',
+            boxSizing: 'border-box',
+            /* Height: ~42% of viewport minus header */
+            height: compactLayout ? '38%' : '40%',
+            minHeight: 220,
+          }}>
+            {/* Radar */}
+            <div style={{ overflow: 'hidden', borderRadius: 8, border: '1px solid #1a1a2e' }}>
               <ExpandableBullseye satellite={liveDataReady ? selectedSat : undefined} debrisList={liveDataReady ? debrisList : []} />
             </div>
-            <div style={{ minHeight: 0, overflow: 'hidden', display: 'grid', gridTemplateRows: 'minmax(0, 0.55fr) minmax(0, 0.45fr)', gap: 6 }}>
-              <div style={{ overflow: 'hidden', minHeight: 0, border: '1px solid #1a1a2e', borderRadius: 8 }}>
+            {/* Telemetry + Alert stacked */}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6, overflow: 'hidden' }}>
+              <div style={{ flex: '0 0 55%', overflow: 'hidden', border: '1px solid #1a1a2e', borderRadius: 8 }}>
                 <TelemetryStatsPanelInline satellite={selectedSat} />
               </div>
-              <div style={{ overflow: 'hidden', minHeight: 0, border: '1px solid #1a1a2e', borderRadius: 8 }}>
+              <div style={{ flex: '1 1 0', overflow: 'hidden', border: '1px solid #1a1a2e', borderRadius: 8 }}>
                 <AlertPanelInline satellites={tableRows} />
               </div>
             </div>
           </div>
-          {/* Ground Track and Heatmap side by side */}
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, minHeight: 0, overflow: 'hidden' }}>
-            <div style={{ minHeight: 0, overflow: 'hidden' }}>
-              <GroundTrackModule liveSats={liveDataReady ? liveSats : []} selectedId={selectedId} />
+
+          {/* ╔══════════════════════════════════╗
+              ║  BOTTOM SECTION — scrollable     ║
+              ╚══════════════════════════════════╝ */}
+          <div style={{
+            flex: 1,
+            overflowY: 'auto',
+            overflowX: 'hidden',
+            scrollbarWidth: 'thin' as const,
+            scrollbarColor: '#1f3c5e transparent',
+            padding: '0 8px 8px 8px',
+            boxSizing: 'border-box',
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 8,
+          }}>
+            <style>{`
+              /* bottom section scrollbar */
+              .rc-bottom::-webkit-scrollbar { width: 5px; }
+              .rc-bottom::-webkit-scrollbar-track { background: transparent; }
+              .rc-bottom::-webkit-scrollbar-thumb { background: #1f3c5e; border-radius: 3px; }
+            `}</style>
+
+            {/* Ground Track + Fuel graph — side by side */}
+            <div style={{
+              display: 'grid',
+              gridTemplateColumns: '1fr 1fr',
+              gap: 8,
+              height: compactLayout ? 180 : 200,
+              flexShrink: 0,
+            }}>
+              <div style={{ overflow: 'hidden', minHeight: 0 }}>
+                <GroundTrackModule liveSats={liveDataReady ? liveSats : []} selectedId={selectedId} />
+              </div>
+              <div style={{ overflow: 'hidden', minHeight: 0 }}>
+                <FuelCollisionGraph tableRows={tableRows} />
+              </div>
             </div>
-            <div style={{ minHeight: 0, overflow: 'hidden' }}>
+
+            {/* Resource Heatmap — full width */}
+            <div style={{ height: compactLayout ? 190 : 210, flexShrink: 0, overflow: 'hidden' }}>
               <ResourceHeatmapModule satellites={tableRows} selectedSatellite={selectedSat} />
             </div>
-          </div>
-          {/* Maneuver Timeline — bottom right */}
-          <div style={{ minHeight: 0, overflow: 'hidden', border: '1px solid #1a1a2e', borderRadius: 8 }}>
-            <ManeuverTimelineModule selectedId={selectedId} satellites={tableRows} />
+
+            {/* Maneuver Timeline — expandable */}
+            <div style={{ flexShrink: 0 }}>
+              <ManeuverTimelineModule selectedId={selectedId} satellites={tableRows} />
+            </div>
+
           </div>
         </div>
 
@@ -2033,7 +2680,8 @@ export default function EnhancedDashboard() {
                       color: isAtRisk ? '#ff9944' : '#e0e0e0',
                       fontSize: 10.5,
                     }}
-                    onClick={() => setSelectedId(sat.id)}
+                    onClick={(e) => handleSatelliteClick(sat.id, e.ctrlKey || e.metaKey)}
+                    title="Click to select · Ctrl+Click to open in new tab"
                     whileHover={{ backgroundColor: 'rgba(255,255,255,0.03)' }}>
                     {[sat.name,sat.az,sat.el,sat.altitude,sat.latitude,sat.longitude,sat.velocity,sat.propellant,sat.debris].map((v, j) => (
                       <p key={j} style={{ overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{v}</p>
@@ -2139,4 +2787,3 @@ export default function EnhancedDashboard() {
     </Tooltip.Provider>
   );
 }
-<p style="color: rgb(138, 168, 216); font-size: 11px; letter-spacing: 1px; margin-bottom: 8px;">TELEMETRY & RESOURCE HEATMAP</p>
