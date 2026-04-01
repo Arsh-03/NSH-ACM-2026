@@ -1332,8 +1332,88 @@ function GroundTrackModule({ liveSats, selectedId }: { liveSats: LiveSat[]; sele
     return { x, y };
   };
 
-  const utcHour = new Date().getUTCHours() + new Date().getUTCMinutes() / 60;
-  const terminatorX = (utcHour / 24) * 100;
+  // ── Compute proper astronomical day/night terminator ──────────────────────
+  // Uses the subsolar point (where the Sun is directly overhead) to compute
+  // the real terminator boundary. This is timezone-independent — new Date()
+  // gives the correct UTC instant for astronomical computation.
+  const nightPolygonPath = useMemo(() => {
+    const now = new Date();
+    const jd = now.getTime() / 86_400_000 + 2_440_587.5;
+    const n = jd - 2_451_545.0;
+    const L = (280.46 + 0.9856474 * n) % 360;
+    const g = ((357.528 + 0.9856003 * n) % 360) * (Math.PI / 180);
+    const lam = (L + 1.915 * Math.sin(g) + 0.02 * Math.sin(2 * g)) * (Math.PI / 180);
+    const eps = (23.439 - 4e-7 * n) * (Math.PI / 180);
+    const dec = Math.asin(Math.sin(eps) * Math.sin(lam));
+    const ra = Math.atan2(Math.cos(eps) * Math.sin(lam), Math.cos(lam));
+    const gst = ((280.46061837 + 360.98564736629 * n) % 360) * (Math.PI / 180);
+    const subSolarLon = ((ra - gst) * 180 / Math.PI + 180) % 360 - 180 + 360;
+
+    // Build terminator polygon in SVG viewBox coords (0-100 x, 0-50 y)
+    const STEPS = 72;
+    const nightPoints: string[] = [];
+
+    for (let i = 0; i <= STEPS; i++) {
+      const latDeg = 90 - (i / STEPS) * 180;
+      const latRad = latDeg * (Math.PI / 180);
+      const cosDec = Math.cos(dec);
+      const cosLat = Math.cos(latRad);
+
+      let haDeg: number;
+      if (cosDec * cosLat === 0) {
+        // Polar edge case
+        haDeg = (Math.sin(dec) * Math.sin(latRad) > 0) ? 180 : 0;
+      } else {
+        const cosHA = -(Math.sin(dec) * Math.sin(latRad)) / (cosDec * cosLat);
+        if (cosHA <= -1) {
+          haDeg = 180; // Midnight sun — entire latitude is lit
+        } else if (cosHA >= 1) {
+          haDeg = 0; // Polar night — entire latitude is dark
+        } else {
+          haDeg = Math.acos(cosHA) * (180 / Math.PI);
+        }
+      }
+
+      // Night side boundary longitude (anti-solar side)
+      // The terminator is at subSolarLon ± haDeg
+      // Night boundary: subSolarLon + haDeg (eastern edge of night)
+      const nightBoundaryLon = ((subSolarLon + haDeg + 180) % 360 + 360) % 360;
+      const x = (nightBoundaryLon / 360) * 100;
+      const y = (i / STEPS) * 50;
+      nightPoints.push(`${x.toFixed(2)},${y.toFixed(2)}`);
+    }
+
+    // Reverse pass: western edge of night
+    for (let i = STEPS; i >= 0; i--) {
+      const latDeg = 90 - (i / STEPS) * 180;
+      const latRad = latDeg * (Math.PI / 180);
+      const cosDec = Math.cos(dec);
+      const cosLat = Math.cos(latRad);
+
+      let haDeg: number;
+      if (cosDec * cosLat === 0) {
+        haDeg = (Math.sin(dec) * Math.sin(latRad) > 0) ? 180 : 0;
+      } else {
+        const cosHA = -(Math.sin(dec) * Math.sin(latRad)) / (cosDec * cosLat);
+        if (cosHA <= -1) {
+          haDeg = 180;
+        } else if (cosHA >= 1) {
+          haDeg = 0;
+        } else {
+          haDeg = Math.acos(cosHA) * (180 / Math.PI);
+        }
+      }
+
+      // Western edge: subSolarLon - haDeg
+      const nightBoundaryLon = ((subSolarLon - haDeg + 180) % 360 + 360) % 360;
+      const x = (nightBoundaryLon / 360) * 100;
+      const y = (i / STEPS) * 50;
+      nightPoints.push(`${x.toFixed(2)},${y.toFixed(2)}`);
+    }
+
+    return nightPoints.join(' ');
+  }, [Math.floor(Date.now() / 60000)]); // Recompute every minute
+
   const atRiskCount = liveSats.filter((s) => s.status === 'AT_RISK' || s.status === 'MANEUVERING').length;
   const selectedTrailCoverage = selectedId ? Math.min(100, Math.round(((trails[selectedId]?.length || 0) / 220) * 100)) : 0;
   const projectionLabel = projectionMode === 'mercator' ? 'Mercator' : 'Equirectangular';
@@ -1364,7 +1444,7 @@ function GroundTrackModule({ liveSats, selectedId }: { liveSats: LiveSat[]; sele
         </div>
       </div>
       <svg viewBox="0 0 100 50" style={{ width: '100%', flex: 1, minHeight: 0, background: 'linear-gradient(180deg,#09172d,#070b16)' }}>
-        <rect x={terminatorX} y="0" width="50" height="50" fill="rgba(3,3,8,0.42)" />
+        <polygon points={nightPolygonPath} fill="rgba(3,3,8,0.42)" />
         {[...Array(6)].map((_, i) => (
           <line key={`lat-${i}`} x1="0" x2="100" y1={i * 10} y2={i * 10} stroke="rgba(170,190,220,0.12)" strokeWidth="0.2" />
         ))}
@@ -1379,27 +1459,36 @@ function GroundTrackModule({ liveSats, selectedId }: { liveSats: LiveSat[]; sele
           const cur = eciToLatLonAlt(s.r);
           const curP = project(cur.lat, cur.lon);
 
+          // Trail: already capped at 90 min by the useEffect filter
           const trailPts = trail.map((p) => {
             const q = project(p.lat, p.lon);
             return `${q.x},${q.y}`;
           }).join(' ');
 
+          // Prediction: 18 × 5-min steps = exactly 90 min ahead
+          // Uses Keplerian two-body integration for curved path accuracy
+          const MU_GT = 398600.4418;
           const pred: string[] = [];
-          for (let t = 600; t <= 5400; t += 600) {
-            const rr = [
-              s.r[0] + s.v[0] * t,
-              s.r[1] + s.v[1] * t,
-              s.r[2] + s.v[2] * t,
-            ];
-            const ll = eciToLatLonAlt(rr);
-            const q = project(ll.lat, ll.lon);
-            pred.push(`${q.x},${q.y}`);
+          if (isSelected && s.v && s.v.length === 3) {
+            const DT = 300; // 5 minutes in seconds
+            const STEPS = 18; // 18 × 5 min = 90 min
+            let pr = [...s.r];
+            let pv = [...s.v];
+            for (let step = 0; step < STEPS; step++) {
+              const mag = Math.sqrt(pr[0]**2 + pr[1]**2 + pr[2]**2);
+              const k = -MU_GT / (mag * mag * mag);
+              pv = [pv[0] + k * pr[0] * DT, pv[1] + k * pr[1] * DT, pv[2] + k * pr[2] * DT];
+              pr = [pr[0] + pv[0] * DT, pr[1] + pv[1] * DT, pr[2] + pv[2] * DT];
+              const ll = eciToLatLonAlt(pr);
+              const q = project(ll.lat, ll.lon);
+              pred.push(`${q.x.toFixed(2)},${q.y.toFixed(2)}`);
+            }
           }
 
           return (
             <g key={s.id}>
               {trailPts.length > 0 && <polyline points={trailPts} fill="none" stroke={isSelected ? 'rgba(128,204,255,0.9)' : 'rgba(84,161,255,0.55)'} strokeWidth={isSelected ? '0.5' : '0.35'} />}
-              {pred.length > 1 && <polyline points={pred.join(' ')} fill="none" stroke="rgba(255,185,96,0.75)" strokeDasharray="1 1" strokeWidth="0.35" />}
+              {isSelected && pred.length > 1 && <polyline points={pred.join(' ')} fill="none" stroke="rgba(255,185,96,0.75)" strokeDasharray="1 1" strokeWidth="0.35" />}
               {isSelected && <circle cx={curP.x} cy={curP.y} r="1.35" fill="none" stroke="white" strokeWidth="0.35" />}
               <circle cx={curP.x} cy={curP.y} r={isSelected ? '0.9' : '0.7'} fill={s.status === 'AT_RISK' || s.status === 'MANEUVERING' ? '#ff5b4d' : '#52a5ff'} />
             </g>
@@ -1514,13 +1603,32 @@ function ResourceHeatmapModule({ satellites, selectedSatellite }: { satellites: 
   );
 }
 
+const THERMAL_COOLDOWN_S = 600; // must match backend THERMAL_COOLDOWN
+const MIN_VISIBLE_BURN_S = 30;
+
+interface TimelineEvent {
+  satellite_id: string;
+  burn_id: string;
+  burn_start: number;
+  burn_end: number;
+  cooldown_end: number;
+  status: 'PENDING' | 'EXECUTED';
+  synthetic?: boolean;
+}
+
 function ManeuverTimelineModule({ selectedId, satellites }: { selectedId?: string; satellites: Satellite[] }) {
   const [pending, setPending] = useState<any[]>([]);
   const [executed, setExecuted] = useState<any[]>([]);
   const [hoveredKey, setHoveredKey] = useState<string | null>(null);
   const [isExpanded, setIsExpanded] = useState(false);
+  // Real per-satellite history fetched from /api/maneuver/history/{sat_id}
+  const [satHistories, setSatHistories] = useState<Record<string, {
+    last_burn_time: number | null;
+    cooldown_active: boolean;
+    cooldown_remaining: number;
+  }>>({});
 
-  // ── Unchanged data-fetch logic ────────────────────────────────────────────
+  // ── Poll /api/maneuver/timeline every 3s ──────────────────────────────────
   useEffect(() => {
     let stop = false;
     const poll = async () => {
@@ -1538,41 +1646,150 @@ function ManeuverTimelineModule({ selectedId, satellites }: { selectedId?: strin
     return () => { stop = true; clearInterval(i); };
   }, []);
 
+  // ── Fetch real burn history for every active/at-risk satellite ────────────
+  // Uses /api/maneuver/history/{sat_id} which returns:
+  //   { last_burn_time, cooldown_active, cooldown_remaining }
+  useEffect(() => {
+    const relevantSats = satellites.filter(
+      (s) => s.status === 'MANEUVERING' || s.status === 'AT_RISK' || s.status === 'POST_BURN'
+    );
+    if (relevantSats.length === 0) return;
+
+    let cancelled = false;
+    const fetchHistories = async () => {
+      const results: typeof satHistories = {};
+      await Promise.all(
+        relevantSats.map(async (s) => {
+          try {
+            const res = await fetch(`/api/maneuver/history/${encodeURIComponent(s.id)}`);
+            if (!res.ok) return;
+            const data = await res.json();
+            results[s.id] = {
+              last_burn_time:    data.last_burn_time   ?? null,
+              cooldown_active:   data.cooldown_active  ?? false,
+              cooldown_remaining: data.cooldown_remaining ?? 0,
+            };
+          } catch (_) {}
+        })
+      );
+      if (!cancelled) setSatHistories((prev) => ({ ...prev, ...results }));
+    };
+
+    fetchHistories();
+    const iv = setInterval(fetchHistories, 5000);
+    return () => { cancelled = true; clearInterval(iv); };
+  }, [satellites]);
+
+  // ── Synthesize timeline rows from satellite status when API returns nothing ─
+  // Uses real last_burn_time / cooldown_remaining from satHistories where available.
   const synthesizedFromStatus = useMemo(() => {
     const nowTs = Date.now() / 1000;
     return satellites
       .filter((s) => s.status === 'MANEUVERING' || s.status === 'AT_RISK' || s.status === 'POST_BURN')
-      .map((s, idx) => ({
-        satellite_id: s.id,
-        burn_id: `LIVE-${idx + 1}`,
-        burn_start: nowTs - 90,
-        burn_end: nowTs + 30,
-        cooldown_end: nowTs + 600,
-        status: s.status === 'MANEUVERING' ? 'EXECUTED' : 'PENDING',
-        synthetic: true,
-      }));
-  }, [satellites]);
+      .map((s, idx) => {
+        const hist = satHistories[s.id];
+        const isManeuvering = s.status === 'MANEUVERING' || s.status === 'POST_BURN';
 
-  const sourceItems = (executed.length + pending.length) > 0
-    ? [...executed, ...pending]
+        let burnStart: number;
+        let burnEnd: number;
+        let cooldownEnd: number;
+
+        if (hist?.last_burn_time) {
+          // ── Real data path ─────────────────────────────────────────────
+          burnStart   = hist.last_burn_time;
+          // Backend records burn_start === burn_end (instant impulse model)
+          // We display a 30s window so the bar is visible on the chart
+          burnEnd     = hist.last_burn_time + 30;
+          cooldownEnd = hist.last_burn_time + THERMAL_COOLDOWN_S;
+        } else if (isManeuvering) {
+          // ── Fallback: satellite is burning right now, no history yet ───
+          // Assume burn started ~30s ago (typical ACM burn window)
+          burnStart   = nowTs - 30;
+          burnEnd     = nowTs + 10;
+          cooldownEnd = nowTs + THERMAL_COOLDOWN_S;
+        } else {
+          // ── AT_RISK: burn is scheduled, place bar in the future ────────
+          // cooldown_remaining tells us how long until the thruster is free
+          const eta   = hist?.cooldown_remaining ?? THERMAL_COOLDOWN_S;
+          burnStart   = nowTs + eta;
+          burnEnd     = burnStart + 30;
+          cooldownEnd = burnEnd + THERMAL_COOLDOWN_S;
+        }
+
+        return {
+          satellite_id: s.id,
+          burn_id:      hist?.last_burn_time
+            ? `HIST-${s.id}-${Math.round(hist.last_burn_time)}`
+            : `LIVE-${idx + 1}`,
+          burn_start:   burnStart,
+          burn_end:     burnEnd,
+          cooldown_end: cooldownEnd,
+          status:       isManeuvering ? 'EXECUTED' : 'PENDING',
+          synthetic:    !hist?.last_burn_time,
+        };
+      });
+  }, [satellites, satHistories]);
+
+  const normalizedApiItems = useMemo(() => {
+    const normalize = (item: any, fallbackStatus: 'PENDING' | 'EXECUTED', idx: number): TimelineEvent | null => {
+      const satId = String(item?.satellite_id ?? '').trim();
+      if (!satId) return null;
+
+      const rawStart = Number(item?.burn_start ?? item?.burn_time);
+      if (!Number.isFinite(rawStart)) return null;
+
+      const rawEnd = Number(item?.burn_end ?? rawStart);
+      const burnStart = rawStart;
+      const burnEnd = Number.isFinite(rawEnd) && rawEnd > burnStart
+        ? rawEnd
+        : burnStart + MIN_VISIBLE_BURN_S;
+
+      const rawCooldownEnd = Number(item?.cooldown_end);
+      const cooldownEnd = Number.isFinite(rawCooldownEnd) && rawCooldownEnd > burnEnd
+        ? rawCooldownEnd
+        : burnEnd + THERMAL_COOLDOWN_S;
+
+      return {
+        satellite_id: satId,
+        burn_id: String(item?.burn_id ?? `${fallbackStatus}-${satId}-${idx + 1}`),
+        burn_start: burnStart,
+        burn_end: burnEnd,
+        cooldown_end: cooldownEnd,
+        status: fallbackStatus,
+        synthetic: false,
+      };
+    };
+
+    const normalizedPending = pending
+      .map((item, idx) => normalize(item, 'PENDING', idx))
+      .filter(Boolean) as TimelineEvent[];
+    const normalizedExecuted = executed
+      .map((item, idx) => normalize(item, 'EXECUTED', idx))
+      .filter(Boolean) as TimelineEvent[];
+
+    return [...normalizedExecuted, ...normalizedPending];
+  }, [pending, executed]);
+
+  const sourceItems: TimelineEvent[] = normalizedApiItems.length > 0
+    ? normalizedApiItems
     : synthesizedFromStatus;
 
   const all = sourceItems
-    .sort((a, b) => Number(a.burn_start ?? a.burn_time ?? 0) - Number(b.burn_start ?? b.burn_time ?? 0))
+    .sort((a, b) => Number(a.burn_start) - Number(b.burn_start))
     .slice(-28);
 
   const now = Date.now() / 1000;
-  const pendingCount  = pending.length  || synthesizedFromStatus.filter((m) => m.status === 'PENDING').length;
-  const executedCount = executed.length || synthesizedFromStatus.filter((m) => m.status === 'EXECUTED').length;
+  const pendingCount  = sourceItems.filter((m) => m.status === 'PENDING').length;
+  const executedCount = sourceItems.filter((m) => m.status === 'EXECUTED').length;
 
   const nextSelectedBurn = selectedId
-    ? all.find((m) => (m.satellite_id || '') === selectedId && Number(m.burn_start ?? m.burn_time ?? 0) >= now)
+    ? all.find((m) => m.satellite_id === selectedId && m.status === 'PENDING' && Number(m.burn_start) >= now)
     : null;
-  const nextGlobalBurn = all.find((m) => Number(m.burn_start ?? m.burn_time ?? 0) >= now);
+  const nextGlobalBurn = all.find((m) => m.status === 'PENDING' && Number(m.burn_start) >= now);
 
   const etaLabel = (event: any | null) => {
     if (!event) return 'none';
-    const t = Number(event.burn_start ?? event.burn_time ?? now);
+    const t = Number(event.burn_start ?? now);
     const delta = Math.round(t - now);
     if (delta <= 0) return 'now';
     const m = Math.floor(delta / 60);
@@ -1586,8 +1803,8 @@ function ManeuverTimelineModule({ selectedId, satellites }: { selectedId?: strin
   };
 
   // ── Time-axis computation (unchanged logic) ───────────────────────────────
-  const eventStarts = all.map((m) => Number(m.burn_time || m.burn_start || now));
-  const eventEnds   = all.map((m) => Number(m.cooldown_end || m.burn_end || m.burn_time || now));
+  const eventStarts = all.map((m) => Number(m.burn_start || now));
+  const eventEnds   = all.map((m) => Number(m.cooldown_end || m.burn_end || now));
   const rawMin = eventStarts.length ? Math.min(...eventStarts) : now;
   const rawMax = eventEnds.length   ? Math.max(...eventEnds)   : now + 3600;
   const dynamicPad = Math.max(900, (rawMax - rawMin) * 0.18);
@@ -1787,10 +2004,10 @@ function ManeuverTimelineModule({ selectedId, satellites }: { selectedId?: strin
           {all.map((m, idx) => {
             const sat           = m.satellite_id || 'SAT';
             const isSelectedSat = Boolean(selectedId && sat === selectedId);
-            const bStart        = Number(m.burn_start ?? m.burn_time ?? now);
-            const bEnd          = Number(m.burn_end   ?? bStart + 120);
-            const cdEnd         = Number(m.cooldown_end ?? (bEnd + 600));
-            const statusLabel   = m.status || (m.created_at ? 'PENDING' : 'EXECUTED');
+            const bStart        = Number(m.burn_start ?? now);
+            const bEnd          = Number(m.burn_end   ?? bStart + MIN_VISIBLE_BURN_S);
+            const cdEnd         = Number(m.cooldown_end ?? (bEnd + THERMAL_COOLDOWN_S));
+            const statusLabel   = m.status || 'EXECUTED';
             const isPending     = statusLabel === 'PENDING';
             const isActive      = bStart <= now && now <= bEnd;
             const rowKey        = `${sat}-${idx}`;
@@ -1889,17 +2106,17 @@ function ManeuverTimelineModule({ selectedId, satellites }: { selectedId?: strin
                     }} />
                   )}
 
-                  {/* ── Burn-start block (green) ── */}
+                  {/* ── Burn window block ── */}
                   <div
                     className="gantt-block"
-                    title={`Burn Start · ${formatUtc(bStart)} UTC`}
+                    title={`Burn Window · ${formatUtc(bStart)}-${formatUtc(bEnd)} UTC`}
                     style={{
                       position: 'absolute',
                       left: `${burnL}%`,
-                      width: `${burnW * 0.48}%`,   // left half = burn start
+                      width: `${burnW}%`,
                       top: 0, bottom: 0,
                       background: burnColor,
-                      borderRadius: '4px 0 0 4px',
+                      borderRadius: 4,
                       opacity: isPending ? 0.65 : 1,
                       boxShadow: burnGlow,
                       display: 'flex', alignItems: 'center', overflow: 'hidden',
@@ -1912,34 +2129,25 @@ function ManeuverTimelineModule({ selectedId, satellites }: { selectedId?: strin
                       whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
                       display: 'flex', alignItems: 'center', gap: 3,
                     }}>
-                      {isAtRisk ? '⚠' : '🔥'} Burn Start
+                      {isAtRisk ? '⚠' : '🔥'} Burn
                     </span>
                   </div>
 
-                  {/* ── Burn-end block (yellow) ── */}
+                  {/* Burn-end marker */}
                   <div
-                    className="gantt-block"
                     title={`Burn End · ${formatUtc(bEnd)} UTC`}
                     style={{
                       position: 'absolute',
-                      left: `${burnL + burnW * 0.5}%`,
-                      width: `${burnW * 0.5}%`,
-                      top: 0, bottom: 0,
+                      left: `${burnR}%`,
+                      top: -1,
+                      bottom: -1,
+                      width: 2,
                       background: cdColor,
-                      borderRadius: '0 4px 4px 0',
-                      opacity: isPending ? 0.6 : 1,
-                      display: 'flex', alignItems: 'center', overflow: 'hidden',
-                      cursor: 'default',
+                      boxShadow: '0 0 5px rgba(232,184,75,0.65)',
+                      zIndex: 6,
+                      pointerEvents: 'none',
                     }}
-                  >
-                    <span style={{
-                      color: '#1a1200', fontSize: 8, paddingLeft: 5,
-                      whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
-                      display: 'flex', alignItems: 'center', gap: 3,
-                    }}>
-                      🔒 Burn End
-                    </span>
-                  </div>
+                  />
 
                   {/* ── Cooldown / orbital zone (striped) ── */}
                   {cdW > 0 && (

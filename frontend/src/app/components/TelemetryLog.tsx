@@ -32,6 +32,7 @@ export function TelemetryLog({ selectedSatellite }: TelemetryLogProps = {}) {
   const logRef    = useRef<HTMLDivElement>(null);
   const wsRef     = useRef<WebSocket | null>(null);
   const startTime = useRef(Date.now());
+  const stateUpdateCountRef = useRef(0);
   // Track last logged status per satellite to avoid duplicate log spam.
   // Only emit a log when a satellite's status actually CHANGES.
   const lastLoggedStatusRef = useRef<Map<string, string>>(new Map());
@@ -100,6 +101,7 @@ export function TelemetryLog({ selectedSatellite }: TelemetryLogProps = {}) {
             const sats   = msg.satellites || [];
             const debris = msg.debris_count || 0;
             const now_ms = Date.now();
+            stateUpdateCountRef.current += 1;
 
             // Only log when a satellite's status CHANGES — never on repeat ticks.
             sats.forEach((s: any) => {
@@ -130,8 +132,8 @@ export function TelemetryLog({ selectedSatellite }: TelemetryLogProps = {}) {
               lastLogTimeRef.current.set(s.id, now_ms);
             });
 
-            // Periodic fleet summary (every ~10 updates)
-            if (Math.random() < 0.1) {
+            // Periodic fleet summary every 10 state updates.
+            if (stateUpdateCountRef.current % 10 === 0) {
               addLog('sync', `Fleet update — ${sats.length} satellites | ${debris} debris tracked`);
             }
           }

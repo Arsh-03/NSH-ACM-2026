@@ -430,17 +430,6 @@ const ExpandedRadarSVG = memo(function ExpandedRadarSVG({
       <line x1={CX} y1={CY - 14} x2={CX} y2={CY - 10} stroke="#3a7fff" strokeWidth="1.5" />
       <line x1={CX} y1={CY + 10} x2={CX} y2={CY + 14} stroke="#3a7fff" strokeWidth="1.5" />
 
-      {/* ── Telemetry overlay (bottom-left) ── */}
-      <rect x="12" y="510" width="180" height="78" rx="6" fill="#0e1b2e" opacity="0.92" />
-      <text x="22" y="526" fill="#8892a4" fontSize="9" fontFamily="Azeret Mono, monospace">ALTITUDE</text>
-      <text x="22" y="540" fill="white" fontSize="12" fontFamily="Azeret Mono, monospace">{satellite.altitude}</text>
-      <text x="22" y="557" fill="#8892a4" fontSize="9" fontFamily="Azeret Mono, monospace">VELOCITY</text>
-      <text x="22" y="571" fill="white" fontSize="12" fontFamily="Azeret Mono, monospace">{satellite.velocity}</text>
-      <text x="100" y="526" fill="#8892a4" fontSize="9" fontFamily="Azeret Mono, monospace">LAT</text>
-      <text x="100" y="540" fill="white" fontSize="12" fontFamily="Azeret Mono, monospace">{satellite.latitude}</text>
-      <text x="100" y="557" fill="#8892a4" fontSize="9" fontFamily="Azeret Mono, monospace">LON</text>
-      <text x="100" y="571" fill="white" fontSize="12" fontFamily="Azeret Mono, monospace">{satellite.longitude}</text>
-
       {/* ── Threat count badge (top-right) ── */}
       <rect x="480" y="12" width="108" height="44" rx="6" fill="#0e1b2e" opacity="0.92" />
       <text x="490" y="28" fill="#8892a4" fontSize="9" fontFamily="Azeret Mono, monospace">IN-RANGE</text>
@@ -858,19 +847,6 @@ export function ExpandableBullseye({
             );
           });
         })()}
-          {satellite && (
-            <g>
-              <rect x="12" y="334" width="170" height="72" rx="5" fill="#0e1b2e" opacity="0.92" />
-              <text x="20" y="350" fill="#8892a4" fontSize="9" fontFamily="Azeret Mono, monospace">Vel</text>
-              <text x="20" y="364" fill="white" fontSize="12" fontFamily="Azeret Mono, monospace">{satellite.velocity}</text>
-              <text x="106" y="350" fill="#8892a4" fontSize="9" fontFamily="Azeret Mono, monospace">Alt</text>
-              <text x="106" y="364" fill="white" fontSize="12" fontFamily="Azeret Mono, monospace">{satellite.altitude}</text>
-              <text x="20" y="384" fill="#8892a4" fontSize="9" fontFamily="Azeret Mono, monospace">Lon</text>
-              <text x="20" y="398" fill="white" fontSize="12" fontFamily="Azeret Mono, monospace">{satellite.longitude}</text>
-              <text x="106" y="384" fill="#8892a4" fontSize="9" fontFamily="Azeret Mono, monospace">Lat</text>
-              <text x="106" y="398" fill="white" fontSize="12" fontFamily="Azeret Mono, monospace">{satellite.latitude}</text>
-            </g>
-          )}
         </svg>
       {/* ── Modal (portal, only mounted when isExpanded) ── */}
       <AnimatePresence>
