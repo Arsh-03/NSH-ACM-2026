@@ -151,12 +151,28 @@ export const HistoricalTrail = memo(function HistoricalTrail({
       ctx.lineWidth = 1.6; ctx.lineCap = 'round'; ctx.stroke();
     }
 
-    // Live-end connector dot: bridges gap between last sample and current position
+    // Live-end connector: bridges gap between last sample and current position
+    const lastPt = trail[trail.length - 1];
     const { x: lx, y: ly } = toPixel(selectedSat.lat, selectedSat.lon, w, h);
+    
+    // Draw connecting line from last history point to the current 60fps RAF position
+    // This prevents the "floating dot" effect where the icon outruns the trail.
+    if (Math.abs(selectedSat.lon - lastPt.lon) < 180) {
+      const { x: px, y: py } = toPixel(lastPt.lat, lastPt.lon, w, h);
+      ctx.beginPath();
+      ctx.moveTo(px, py);
+      ctx.lineTo(lx, ly);
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 1.6;
+      ctx.globalAlpha = 0.8;
+      ctx.stroke();
+    }
+
+    // Live-end dot
     ctx.beginPath();
     ctx.arc(lx, ly, 3, 0, Math.PI * 2);
     ctx.fillStyle = color;
-    ctx.globalAlpha = 0.65;
+    ctx.globalAlpha = 0.9;
     ctx.fill();
     ctx.globalAlpha = 1;
 
@@ -515,7 +531,7 @@ export const TerminatorOverlay = memo(function TerminatorOverlay({ containerRef 
     };
 
     draw();
-    const timerId = setInterval(draw, 60_000);
+    const timerId = setInterval(draw, 2_000); // Update night mask every 2s to match motion
     return () => clearInterval(timerId);
   }, [w, h]);
 
