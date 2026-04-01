@@ -304,6 +304,7 @@ export const PredictedPath = memo(function PredictedPath({
 
 interface TerminatorOverlayProps {
   containerRef: RefObject<HTMLDivElement | null>;
+  serverTime: number;
 }
 
 /**
@@ -416,7 +417,7 @@ function atmosphericHaloAlpha(cosZ: number): number {
   return Math.round(38 * Math.exp(-(dz * dz) / (2 * sigma * sigma)));
 }
 
-export const TerminatorOverlay = memo(function TerminatorOverlay({ containerRef }: TerminatorOverlayProps) {
+export const TerminatorOverlay = memo(function TerminatorOverlay({ containerRef, serverTime }: TerminatorOverlayProps) {
   const { w, h } = useContainerSize(containerRef);
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
@@ -433,7 +434,8 @@ export const TerminatorOverlay = memo(function TerminatorOverlay({ containerRef 
       }
 
       // ── Subsolar point → ECEF unit sun vector ────────────────────────────
-      const { lat: subLat, lon: subLon } = computeSubsolarPoint(new Date());
+      const simDate = new Date(serverTime * 1000);
+      const { lat: subLat, lon: subLon } = computeSubsolarPoint(simDate);
       const φs = subLat * (Math.PI / 180);
       const λs = subLon * (Math.PI / 180);
       const sx = Math.cos(φs) * Math.cos(λs);
@@ -559,13 +561,14 @@ interface OrbitalOverlaysGroupProps {
   selectedSat: SimSatellite | null;
   prediction: PredictPoint[];
   tick: number;
+  serverTime: number;
   containerRef: RefObject<HTMLDivElement | null>;
 }
 
-export function OrbitalOverlaysGroup({ selectedSat, prediction, tick, containerRef }: OrbitalOverlaysGroupProps) {
+export function OrbitalOverlaysGroup({ selectedSat, prediction, tick, serverTime, containerRef }: OrbitalOverlaysGroupProps) {
   return (
     <>
-      <TerminatorOverlay containerRef={containerRef} />
+      <TerminatorOverlay containerRef={containerRef} serverTime={serverTime} />
       <HistoricalTrail selectedSat={selectedSat} tick={tick} containerRef={containerRef} />
       <PredictedPath selectedSat={selectedSat} prediction={prediction} containerRef={containerRef} />
     </>

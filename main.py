@@ -105,9 +105,15 @@ async def _send_state(websocket: WebSocket):
             r = data["r"]
             debris_compact.append([str(obj_id), float(r[0]), float(r[1]), float(r[2])])
 
+    # ── Simulation Clock ──────────────────────────────────────────────────────
+    # We use the most recent satellite update timestamp as the authoritative
+    # 'sim_time'. This ensures the frontend's GMST calculation stays perfectly
+    # in sync with the backend's integrator clock, eliminating longitudinal drift.
+    authoritative_ts = max((s["lastUpdate"] for s in satellites), default=time.time())
+
     payload = {
         "type": "state_update",
-        "timestamp": float(time.time()),
+        "timestamp": float(authoritative_ts),
         "satellites": satellites,
         "debris_compact": debris_compact,
         "sat_count": len(satellites),

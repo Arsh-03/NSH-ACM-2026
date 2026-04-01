@@ -252,11 +252,15 @@ interface UseOrbitalSimulationOptions {
   liveSats: LiveSatInput[];
   /** Currently selected satellite ID (for prediction computation) */
   selectedId: string;
+  /** Authoritative server time in seconds (from WS message) */
+  serverTime: number;
 }
 
 interface UseOrbitalSimulationResult {
   /** Tick counter — increment signals "state has changed, please re-read simRef" */
   tick: number;
+  /** Current authoritative simulation time */
+  simTime: number;
   /** Ref to current simulation state — read this in render, never store a copy */
   simRef: React.MutableRefObject<Map<string, SimSatellite>>;
   /** Predicted future positions for the selected satellite */
@@ -268,6 +272,7 @@ interface UseOrbitalSimulationResult {
 export function useOrbitalSimulation({
   liveSats,
   selectedId,
+  serverTime,
 }: UseOrbitalSimulationOptions): UseOrbitalSimulationResult {
 
   // ── Simulation state in a ref (not state) to avoid React re-renders per frame
@@ -300,16 +305,18 @@ export function useOrbitalSimulation({
   // Whether history has been seeded for each satellite
   const seededRef        = useRef<Set<string>>(new Set());
   // Anchors the simulation to the latest authoritative backend clock
-  const simTimeRef       = useRef<number>(Date.now());
-  // Current selected ID ref (avoids stale closure in RAF)
-  const selectedIdRef    = useRef<string>(selectedId);
+  const lastServerTimeRef = useRef<number>(serverTime || Date.now() / 1000);
+  const lastWallTimeRef   = useRef<number>(Date.now());
+  const selectedIdRef     = useRef<string>(selectedId);
   selectedIdRef.current  = selectedId;
 
   // Immediate prediction update function
   const regeneratePrediction = useCallback(() => {
     const sel = simRef.current.get(selectedIdRef.current);
     if (sel?.r?.length === 3 && sel?.v?.length === 3) {
-      const pts = propagateN(sel.r, sel.v, PREDICT_DT_S, PREDICT_STEPS, simTimeRef.current);
+      const wallClock = Date.now();
+      const simTime   = lastServerTimeRef.current + (wallClock - lastWallTimeRef.current) / 1000;
+      const pts = propagateN(sel.r, sel.v, PREDICT_DT_S, PREDICT_STEPS, simTime * 1000);
       const current: PredictPoint = { lat: sel.lat, lon: sel.lon };
       setPrediction([current, ...pts]);
     }
@@ -323,9 +330,9 @@ export function useOrbitalSimulation({
   useEffect(() => {
     const sim = simRef.current;
     
-    // Use latest message timestamp or fallback
-    const wallClock = Date.now();
-    simTimeRef.current = wallClock;
+    // Update authoritative clock anchor
+    lastServerTimeRef.current = serverTime;
+    lastWallTimeRef.current   = Date.now();
 
     liveSats.forEach((ls) => {
       if (!ls.r?.length || !ls.v?.length) return;
@@ -345,14 +352,16 @@ export function useOrbitalSimulation({
           regeneratePrediction();
         }
 
-        const geo = eciToGeo(existing.r, getGmstRad(simTimeRef.current));
+        const simTime = lastServerTimeRef.current + (Date.now() - lastWallTimeRef.current) / 1000;
+        const geo = eciToGeo(existing.r, getGmstRad(simTime * 1000));
         existing.lat = geo.lat;
         existing.lon = geo.lon;
         existing.alt = geo.alt;
       } else {
         // First time we see this satellite — MapViewPanel was just remounted
         // with real positions so we seed history immediately.
-        const geo = eciToGeo(ls.r, getGmstRad(simTimeRef.current));
+        const simTime = lastServerTimeRef.current + (Date.now() - lastWallTimeRef.current) / 1000;
+        const geo = eciToGeo(ls.r, getGmstRad(simTime * 1000));
         const newSat: SimSatellite = {
           id:      ls.id,
           status:  ls.status,
@@ -370,7 +379,8 @@ export function useOrbitalSimulation({
         };
 
         if (!seededRef.current.has(ls.id) && ls.r.length === 3 && ls.v.length === 3) {
-          newSat.history = seedHistory(ls.r, ls.v, simTimeRef.current);
+          const simTime = lastServerTimeRef.current + (Date.now() - lastWallTimeRef.current) / 1000;
+          newSat.history = seedHistory(ls.r, ls.v, simTime * 1000);
           seededRef.current.add(ls.id);
         }
         sim.set(ls.id, newSat);
@@ -381,7 +391,7 @@ export function useOrbitalSimulation({
     for (const id of sim.keys()) {
       if (!liveIds.has(id)) sim.delete(id);
     }
-  }, [liveSats, selectedId, regeneratePrediction]);
+  }, [liveSats, selectedId, serverTime, regeneratePrediction]);
 
   // ── RAF animation loop ─────────────────────────────────────────────────────
   useEffect(() => {
@@ -400,8 +410,10 @@ export function useOrbitalSimulation({
       const dt_s      = Math.min(dt_ms / 1000, MAX_DT_S);
       lastTimeRef.current = now;
 
+      // Current authoritative simulation time (interpolated)
       const wallClock = Date.now();
-      const gmstRad   = getGmstRad(wallClock);
+      const simTime   = lastServerTimeRef.current + (wallClock - lastWallTimeRef.current) / 1000;
+      const gmstRad   = getGmstRad(simTime * 1000);
       const sim       = simRef.current;
 
       // ── Update every satellite position ───────────────────────────────────
@@ -472,7 +484,8 @@ export function useOrbitalSimulation({
       ) {
         const sel = sim.get(selectedIdRef.current);
         if (sel?.r?.length === 3 && sel?.v?.length === 3) {
-          const pts = propagateN(sel.r, sel.v, PREDICT_DT_S, PREDICT_STEPS, simTimeRef.current);
+          const simTime = lastServerTimeRef.current + (Date.now() - lastWallTimeRef.current) / 1000;
+          const pts = propagateN(sel.r, sel.v, PREDICT_DT_S, PREDICT_STEPS, simTime * 1000);
           // Include current position as first point so path starts at marker
           const current: PredictPoint = { lat: sel.lat, lon: sel.lon };
           setPrediction([current, ...pts]);
@@ -502,18 +515,21 @@ export function useOrbitalSimulation({
 
     const sel = simRef.current.get(selectedId);
     if (sel?.r?.length === 3 && sel?.v?.length === 3) {
-      const pts = propagateN(sel.r, sel.v, PREDICT_DT_S, PREDICT_STEPS, simTimeRef.current);
+      const simTime = lastServerTimeRef.current + (Date.now() - lastWallTimeRef.current) / 1000;
+      const pts = propagateN(sel.r, sel.v, PREDICT_DT_S, PREDICT_STEPS, simTime * 1000);
       setPrediction([{ lat: sel.lat, lon: sel.lon }, ...pts]);
     } else {
       setPrediction([]);
     }
   }, [selectedId]);
 
-  // ── Satellite ID list ──────────────────────────────────────────────────────
-  // Derived from the simulation map. Recomputed only when liveSats changes.
-  const satIds = liveSats.map((s) => s.id);
-
-  return { tick, simRef, prediction, satIds };
+  return {
+    tick,
+    simTime: lastServerTimeRef.current + (Date.now() - lastWallTimeRef.current) / 1000,
+    simRef,
+    prediction,
+    satIds: Array.from(simRef.current.keys()),
+  };
 }
 
 // ── Helper: extract a snapshot array from simRef ───────────────────────────────

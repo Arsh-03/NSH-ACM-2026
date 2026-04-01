@@ -66,6 +66,7 @@ interface MapViewPanelProps {
   selectedId: string;
   // ctrlOpen = true when Ctrl/Cmd was held on click → open in new tab
   onSelect: (id: string, ctrlOpen?: boolean) => void;
+  serverTime: number;
   debrisFilterKm?: number;
 }
 
@@ -259,10 +260,10 @@ const GroundStationMarker = memo(function GroundStationMarker({ station }: { sta
   );
 });
 
-const DebrisMarker = memo(function DebrisMarker({ debris, now }: { debris: { id: string; r: number[] }; now: Date }) {
+const DebrisMarker = memo(function DebrisMarker({ debris, simTime }: { debris: { id: string; r: number[] }; simTime: number }) {
   const [hovered, setHovered] = useState(false);
   if (!debris.r || debris.r.length < 3) return null;
-  const { lat, lon, alt } = eciToLatLonAlt(debris.r, now);
+  const { lat, lon, alt } = eciToLatLonAlt(debris.r, new Date(simTime * 1000));
   const x = ((lon + 180) / 360) * 100;
   const y = ((90 - lat) / 180) * 100;
   return (
@@ -463,9 +464,10 @@ interface GroundTrackMapProps {
   debrisList: { id: string; r: number[] }[];
   selectedId: string;
   onSelect: (id: string, ctrlOpen?: boolean) => void;
+  serverTime: number;
 }
 
-function GroundTrackMap({ liveSats, debrisList, selectedId, onSelect }: GroundTrackMapProps) {
+function GroundTrackMap({ liveSats, debrisList, selectedId, onSelect, serverTime }: GroundTrackMapProps) {
   const containerRef = useRef<HTMLDivElement>(null);
 
   // LOCAL selection state — controls trail visibility independently
@@ -488,9 +490,10 @@ function GroundTrackMap({ liveSats, debrisList, selectedId, onSelect }: GroundTr
   // This single call starts the continuous animation loop.
   // `tick` is the frame counter; `simRef` holds all satellite state.
   // `prediction` is pre-computed for the selected satellite.
-  const { tick, simRef, prediction } = useOrbitalSimulation({
+  const { tick, simRef, prediction, simTime } = useOrbitalSimulation({
     liveSats,
     selectedId: mapSelectedId ?? '',
+    serverTime,
   });
 
   // Convert simRef Map to array — re-reads current state on each tick
@@ -500,8 +503,6 @@ function GroundTrackMap({ liveSats, debrisList, selectedId, onSelect }: GroundTr
   const selectedSat = mapSelectedId
     ? (simRef.current.get(mapSelectedId) ?? null)
     : null;
-
-  const now = useMemo(() => new Date(), [tick]);
 
   return (
     <div ref={containerRef} style={{
@@ -575,7 +576,7 @@ function GroundTrackMap({ liveSats, debrisList, selectedId, onSelect }: GroundTr
 
       {/* z:9 Debris layer */}
       {debrisList.map((deb) => (
-        <DebrisMarker key={deb.id} debris={deb} now={now} />
+        <DebrisMarker key={deb.id} debris={deb} simTime={simTime} />
       ))}
 
       {/* z:12 Legend */}
@@ -661,7 +662,7 @@ function GroundTrackMap({ liveSats, debrisList, selectedId, onSelect }: GroundTr
  *   useOrbitalSimulation call up to MapViewPanel so both views share it.
  *   The pattern below keeps it simple: simulation runs in 2D, 3D reads live.
  */
-export function MapViewPanel({ satellites, debrisList, selectedId, onSelect, debrisFilterKm = 500 }: MapViewPanelProps) {
+export function MapViewPanel({ satellites, debrisList, selectedId, onSelect, serverTime, debrisFilterKm = 500 }: MapViewPanelProps) {
   const [viewMode, setViewMode] = useState<'3D' | '2D'>('3D');
   const toggle = useCallback(() => setViewMode(m => m === '3D' ? '2D' : '3D'), []);
   const is3D   = viewMode === '3D';
@@ -712,6 +713,7 @@ export function MapViewPanel({ satellites, debrisList, selectedId, onSelect, deb
           debrisList={debrisList}
           selectedId={selectedId}
           onSelect={onSelect}
+          serverTime={serverTime}
         />
       </div>
 

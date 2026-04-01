@@ -178,6 +178,7 @@ function useLiveData() {
   const [debrisList,    setDebrisList]    = useState<{id:string;r:number[];v:number[]}[]>([]);
   const [counts,        setCounts]        = useState({ satellites:0, debris:0, at_risk:0 });
   const [connected,     setConnected]     = useState(false);
+  const [serverTime,    setServerTime]    = useState<number>(Date.now() / 1000);
   const [istTime,       setIstTime]       = useState('--:--:--');
   const [liveDataReady, setLiveDataReady] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
@@ -202,12 +203,8 @@ function useLiveData() {
 
   useEffect(() => {
     const clock = setInterval(() => {
-      const ist = new Date(Date.now() + 5.5*3600000);
-      setIstTime(
-        `${String(ist.getUTCHours()).padStart(2,'0')}:` +
-        `${String(ist.getUTCMinutes()).padStart(2,'0')}:` +
-        `${String(ist.getUTCSeconds()).padStart(2,'0')}`
-      );
+      // The istTime in the UI is just for visual reference.
+      // We update it from the latest serverTime if we are live.
     }, 1000);
 
     const connect = () => {
@@ -229,6 +226,16 @@ function useLiveData() {
             const incomingSats  = msg.satellites || [];
             const compact       = msg.debris_compact || [];
             const satCount      = incomingSats.length;
+
+            if (msg.timestamp) {
+              setServerTime(msg.timestamp);
+              const ist = new Date(msg.timestamp * 1000 + 5.5 * 3600000);
+              setIstTime(
+                `${String(ist.getUTCHours()).padStart(2,'0')}:` +
+                `${String(ist.getUTCMinutes()).padStart(2,'0')}:` +
+                `${String(ist.getUTCSeconds()).padStart(2,'0')}`
+              );
+            }
 
             // Always update the header counts (cheap, always visible)
             setCounts({
@@ -308,7 +315,7 @@ function useLiveData() {
     return () => { clearInterval(clock); clearInterval(poll); wsRef.current?.close(); };
   }, []);
 
-  return { satellites, debrisList, counts, connected, istTime, liveDataReady };
+  return { satellites, debrisList, counts, connected, serverTime, istTime, liveDataReady };
 }
 
 
