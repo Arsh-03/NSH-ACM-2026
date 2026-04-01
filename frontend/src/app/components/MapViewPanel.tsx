@@ -34,7 +34,7 @@
 import { useState, useRef, useCallback, useMemo, useEffect, memo } from 'react';
 import { GlobeView } from './EnhancedDashboard';
 import earthMap from '../../assets/earth_globe.jpg';
-import { OrbitalOverlaysGroup } from './OrbitalOverlays';
+import { OrbitalOverlaysGroup } from './Orbitaloverlays';
 import {
   useOrbitalSimulation,
   useSimSnapshot,

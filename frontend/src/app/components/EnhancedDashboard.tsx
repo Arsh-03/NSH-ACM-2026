@@ -227,7 +227,8 @@ function useLiveData() {
       pendingSatsRef.current    = [];
       pendingDebrisRef.current  = [];
 
-      const ws = new WebSocket(`ws://${window.location.hostname}:8000/ws`);
+      const wsProtocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
+      const ws = new WebSocket(`${wsProtocol}://${window.location.host}/ws`);
       wsRef.current = ws;
       ws.onopen = () => { setConnected(true); ws.send(JSON.stringify({type:'get_state'})); };
 

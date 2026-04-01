@@ -84,7 +84,8 @@ export function TelemetryLog({ selectedSatellite }: TelemetryLogProps = {}) {
   // WebSocket — real backend events
   useEffect(() => {
     const connect = () => {
-      const ws = new WebSocket(`ws://${window.location.hostname}:8000/ws`);
+      const wsProtocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
+      const ws = new WebSocket(`${wsProtocol}://${window.location.host}/ws`);
       wsRef.current = ws;
 
       ws.onopen = () => {

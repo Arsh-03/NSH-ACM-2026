@@ -1,37 +1,42 @@
-# Use the official Ubuntu 22.04 as the base image
+# Use Ubuntu 22.04 as the required runtime base image.
 FROM ubuntu:22.04
 
-# Set environment variables to prevent interactive prompts during install
-ENV DEBIAN_FRONTEND=noninteractive
-ENV PYTHONUNBUFFERED=1
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1
 
-# 1. Install System Dependencies
-# We include git and build-essential just in case any library needs a quick compile
-RUN apt-get update && apt-get install -y \
+WORKDIR /app
+
+# System packages needed for Python, numerical libraries, and the frontend build.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    ca-certificates \
+    curl \
+    git \
+    gnupg \
     python3 \
     python3-pip \
     python3-venv \
-    git \
-    build-essential \
+    && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/*
 
-# 2. Set the working directory inside the container
+# Install backend dependencies first so Docker can cache them efficiently.
+COPY requirements.txt ./
+RUN python3 -m pip install --upgrade pip \
+    && python3 -m pip install -r requirements.txt
+
+# Build the frontend into frontend/dist so FastAPI can serve it.
+COPY frontend/package.json frontend/package.json
+WORKDIR /app/frontend
+RUN npm install
+COPY frontend/ ./
+RUN npm run build
+
+# Copy the backend and shared project files.
 WORKDIR /app
+COPY . ./
 
-# 3. Copy only requirements first to leverage Docker cache
-COPY requirements.txt .
-
-# 4. Install Python dependencies
-# Using --no-cache-dir keeps the image size small
-RUN pip3 install --no-cache-dir --upgrade pip && \
-    pip3 install --no-cache-dir -r requirements.txt
-
-# 5. Copy the rest of your ACM source code
-COPY . .
-
-# 6. Expose Port 8000 for the Simulation Grader
 EXPOSE 8000
 
-# 7. Start the FastAPI server
-# main.py internally calls uvicorn.run(app, host="0.0.0.0", port=8000)
-CMD ["python3", "main.py"]
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]

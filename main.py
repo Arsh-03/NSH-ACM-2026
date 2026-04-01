@@ -2,6 +2,7 @@ import uvicorn
 import asyncio
 import json
 import time
+import os
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -176,8 +177,9 @@ async def health_check():
     }
 
 
-# ── Serve frontend (uncomment after npm run build) ────────────────────────────
-# app.mount("/", StaticFiles(directory="frontend/dist", html=True), name="frontend")
+# ── Serve frontend when the production build is present ──────────────────────
+if os.path.isdir("frontend/dist"):
+    app.mount("/", StaticFiles(directory="frontend/dist", html=True), name="frontend")
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)

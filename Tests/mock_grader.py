@@ -10,12 +10,13 @@ This generator now creates:
 import math
 import random
 import time
+import os
 from typing import Dict, List, Tuple
 
 import numpy as np
 import requests
 
-BASE_URL = "http://localhost:8000/api"
+BASE_URL = os.environ.get("BASE_URL", "http://localhost:8000/api")
 RE = 6378.137
 UPDATE_RATE = 2.0
 

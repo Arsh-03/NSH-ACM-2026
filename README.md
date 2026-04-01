@@ -46,7 +46,39 @@ nsh-acm-2026/
 
 ## 🚀 Getting Started
 
-### 1. Environment & Backend Setup
+### 1. Docker Setup (Recommended for Submission)
+Build and run the full stack (FastAPI + built frontend) using Docker.
+
+```bash
+# From repository root
+docker build -t nsh-acm-2026 .
+docker run --rm -p 8000:8000 nsh-acm-2026
+```
+
+Open: `http://localhost:8000`
+
+If port 8000 is already in use, map another host port:
+
+```bash
+docker run --rm -p 8001:8000 nsh-acm-2026
+```
+
+Then open: `http://localhost:8001`
+
+To populate live telemetry in Docker mode, run the mock grader in a separate terminal:
+
+```bash
+# If container runs on 8000
+python Tests/mock_grader.py
+
+# If container runs on 8001 (PowerShell)
+$env:BASE_URL="http://localhost:8001/api"
+python Tests/mock_grader.py
+```
+
+### 2. Local Development Setup
+
+#### Environment & Backend Setup
 Create and activate the virtual environment (Python 3.10+ recommended) and install dependencies.
 
 ```bash
@@ -67,7 +99,7 @@ python main.py
 ```
 *Backend runs at `http://localhost:8000`*
 
-### 2. Frontend Setup
+#### Frontend Setup
 Navigate to the frontend directory and start the Vite dev server.
 ```bash
 cd frontend
@@ -76,7 +108,7 @@ npm run dev
 ```
 *Frontend runs at `http://localhost:5173`*
 
-### 3. Populating Data (Mock Grader)
+#### Populating Data (Mock Grader)
 To see the dashboard in action, run the mock grader to stream orbital telemetry into the system.
 ```bash
 python Tests/mock_grader.py
